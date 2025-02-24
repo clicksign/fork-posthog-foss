@@ -1,0 +1,88 @@
+# version: 1.0.0
+# DevOps Team
+# Em caso de qualquer problema, por favor, não hesite em entrar em contato com o nosso time de suporte
+
+name: CI - Build on Push
+
+on:
+  workflow_dispatch:
+  push:
+    branches-ignore:
+      - main
+    paths-ignore:
+      - .github/**
+      
+jobs:
+##################################
+# Build Docker Image for AWS ECR #
+##################################
+  docker-build:
+    name: Build - Docker Self Hosted
+    runs-on: [self-hosted, worker-app-build]
+    
+    env:
+      VAULT_TOKEN: ${{ secrets.VAULT_TOKEN }}
+      VAULT_ADDR: ${{ secrets.VAULT_ADDR }}
+      AWS_REGION: us-east-1
+
+    steps:       
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Extract branch name
+        id: extract_branch_name
+        run: |
+          branch_formated=$(echo $GITHUB_REF | tr -c '[:alnum:]' '-' | tr '[:upper:]' '[:lower:]' | sed 's/-$//' | sed 's|refs-heads-||' | sed 's|refs-tags-||')
+          echo $branch_formated
+
+          echo "branch_formated=$branch_formated" >> "$GITHUB_OUTPUT"
+
+      - name: Vault - Login
+        run: |
+          vault login -no-print ${{ secrets.VAULT_TOKEN }}
+
+      - name: Vault - Import secrets
+        id: vault_secrets
+        run: |
+          # get vaults secrets
+          export VAULT_ADDR=${{ secrets.VAULT_ADDR }}
+          export AWS_COMMON_ECR=$(vault kv get -mount=cloud -field=AWS_COMMON_ECR_REPOSITORY_URL aws/projects/clicksign/common)
+          export AWS_ACCESS_KEY=$(vault kv get -mount=cloud -field=BUDDY_WORKS_ACCESS_KEY /aws/users/common)
+          export AWS_SECRET_ACCESS_KEY=$(vault kv get -mount=cloud -field=BUDDY_WORKS_SECRET_ACCESS_KEY /aws/users/common)
+          export AWS_ECR_REPOSITORY="$AWS_COMMON_ECR/posthog:${{ steps.extract_branch_name.outputs.branch_formated }}"
+
+          # add mask
+          echo "::add-mask::$AWS_ACCESS_KEY"
+          echo "::add-mask::$AWS_SECRET_ACCESS_KEY"
+
+          # set output
+          echo "AWS_ACCESS_KEY=$AWS_ACCESS_KEY" >> "$GITHUB_OUTPUT"
+          echo "AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY" >> "$GITHUB_OUTPUT"
+          echo "AWS_ECR_REPOSITORY=$AWS_ECR_REPOSITORY" >> "$GITHUB_OUTPUT"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ steps.vault_secrets.outputs.AWS_ACCESS_KEY }}
+          aws-secret-access-key: ${{ steps.vault_secrets.outputs.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+          
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+
+      - name: Get Tag Name to ECR Image Tag
+        id: get_branch
+        run: |
+          first_branch=$(git branch | grep "*")
+          branch=${first_branch:2}
+          branch_formated=$(echo "$branch" | sed "s/\//\_/")
+          echo "::set-output name=CURRENT_BRANCH::$(echo $branch_formated)"
+
+      - name: Docker Build
+        run: |     
+          docker build -t ${{ steps.vault_secrets.outputs.AWS_ECR_REPOSITORY }} .  
+
+      - name: Push to ECR
+        run: | 
+          docker push ${{ steps.vault_secrets.outputs.AWS_ECR_REPOSITORY }}
