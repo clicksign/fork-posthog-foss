@@ -18,7 +18,7 @@ jobs:
 ##################################
   docker-build:
     name: Build - Docker Self Hosted
-    runs-on: [self-hosted, worker-app-build]
+    runs-on: ubuntu-latest
     
     env:
       VAULT_TOKEN: ${{ secrets.VAULT_TOKEN }}
