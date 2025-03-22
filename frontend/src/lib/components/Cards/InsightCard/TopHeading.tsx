@@ -1,7 +1,7 @@
 import { dateFilterToText } from 'lib/utils'
 import { InsightTypeMetadata, QUERY_TYPES_METADATA } from 'scenes/saved-insights/SavedInsights'
 
-import { Node, NodeKind } from '~/queries/schema'
+import { Node, NodeKind } from '~/queries/schema/schema-general'
 import {
     containsHogQLQuery,
     dateRangeFor,
@@ -42,7 +42,12 @@ export function TopHeading({ query }: { query: Node | null }): JSX.Element {
     return (
         <>
             <span title={insightType?.description}>{insightType?.name}</span>
-            {dateText ? <> • {dateText}</> : null}
+            {dateText ? (
+                <>
+                    {' '}
+                    • <span className="whitespace-nowrap">{dateText}</span>
+                </>
+            ) : null}
         </>
     )
 }

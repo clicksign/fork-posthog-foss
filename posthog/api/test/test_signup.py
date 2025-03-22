@@ -1,10 +1,9 @@
-import datetime
 import uuid
+from datetime import datetime, timedelta
 from typing import Optional, cast
 from unittest import mock
 from unittest.mock import ANY, patch
 from zoneinfo import ZoneInfo
-from datetime import timedelta
 
 import pytest
 from django.core import mail
@@ -73,6 +72,7 @@ class TestSignupAPI(APIBaseTest):
                 "redirect_url": "/",
                 "is_email_verified": False,
                 "hedgehog_config": None,
+                "role_at_organization": "product",
             },
         )
 
@@ -80,6 +80,7 @@ class TestSignupAPI(APIBaseTest):
         self.assertEqual(user.first_name, "John")
         self.assertEqual(user.last_name, "Doe")
         self.assertEqual(user.email, "hedgehog@posthog.com")
+        self.assertEqual(user.role_at_organization, "product")
         self.assertTrue(user.is_staff)  # True because this is the first user in the instance
         self.assertFalse(user.is_email_verified)
 
@@ -143,6 +144,7 @@ class TestSignupAPI(APIBaseTest):
                 "redirect_url": f"/verify_email/{user.uuid}",
                 "is_email_verified": False,
                 "hedgehog_config": None,
+                "role_at_organization": "product",
             },
         )
 
@@ -193,6 +195,7 @@ class TestSignupAPI(APIBaseTest):
                 "redirect_url": "/",
                 "is_email_verified": False,
                 "hedgehog_config": None,
+                "role_at_organization": "product",
             },
         )
         mock_is_email_available.assert_called()
@@ -268,7 +271,7 @@ class TestSignupAPI(APIBaseTest):
             super(LicenseManager, cast(LicenseManager, License.objects)).create(
                 key="key_123",
                 plan="enterprise",
-                valid_until=timezone.datetime(2038, 1, 19, 3, 14, 7),
+                valid_until=datetime(2038, 1, 19, 3, 14, 7),
             )
 
             Organization.objects.create(name="name")
@@ -297,6 +300,7 @@ class TestSignupAPI(APIBaseTest):
                 "first_name": "Jane",
                 "email": "hedgehog2@posthog.com",
                 "password": VALID_TEST_PASSWORD,
+                "role_at_organization": "product",
             },
         )
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
@@ -315,6 +319,7 @@ class TestSignupAPI(APIBaseTest):
                 "redirect_url": "/",
                 "is_email_verified": False,
                 "hedgehog_config": None,
+                "role_at_organization": "product",
             },
         )
 
@@ -322,6 +327,7 @@ class TestSignupAPI(APIBaseTest):
         self.assertEqual(user.first_name, "Jane")
         self.assertEqual(user.email, "hedgehog2@posthog.com")
         self.assertEqual(organization.name, f"{user.first_name}'s Organization")
+        self.assertEqual(user.role_at_organization, "product")
         self.assertTrue(user.is_staff)  # True because this is the first user in the instance
 
         # Assert that the sign up event & identify calls were sent to PostHog analytics
@@ -475,6 +481,7 @@ class TestSignupAPI(APIBaseTest):
                 "first_name": "Jane",
                 "email": "hedgehog75@posthog.com",
                 "password": VALID_TEST_PASSWORD,
+                "role_at_organization": "product",
             },
         )
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
@@ -493,6 +500,7 @@ class TestSignupAPI(APIBaseTest):
                 "redirect_url": "/",
                 "is_email_verified": False,
                 "hedgehog_config": None,
+                "role_at_organization": "product",
             },
         )
 
@@ -515,7 +523,7 @@ class TestSignupAPI(APIBaseTest):
             super(LicenseManager, cast(LicenseManager, License.objects)).create(
                 key="key_123",
                 plan="enterprise",
-                valid_until=timezone.datetime(2038, 1, 19, 3, 14, 7),
+                valid_until=datetime(2038, 1, 19, 3, 14, 7),
             )
 
             with self.settings(
@@ -551,7 +559,7 @@ class TestSignupAPI(APIBaseTest):
             super(LicenseManager, cast(LicenseManager, License.objects)).create(
                 key="key_123",
                 plan="enterprise",
-                valid_until=timezone.datetime(2038, 1, 19, 3, 14, 7),
+                valid_until=datetime(2038, 1, 19, 3, 14, 7),
             )
 
             with self.settings(
@@ -655,6 +663,7 @@ class TestSignupAPI(APIBaseTest):
         mock_request.return_value.json.return_value = {
             "access_token": "123",
             "email": "jane@hogflix.posthog.com",
+            "sub": "123",
         }
 
         response = self.client.get(url, follow=True)
@@ -789,6 +798,7 @@ class TestSignupAPI(APIBaseTest):
             mock_request.return_value.json.return_value = {
                 "access_token": "123",
                 "email": "jane@hogflix.posthog.com",
+                "sub": "123",
             }
 
             response = self.client.get(url, follow=True)
@@ -828,6 +838,7 @@ class TestSignupAPI(APIBaseTest):
         mock_request.return_value.json.return_value = {
             "access_token": "123",
             "email": "alice@posthog.net",
+            "sub": "123",
         }
 
         response = self.client.get(url, follow=True)
@@ -857,6 +868,7 @@ class TestSignupAPI(APIBaseTest):
         mock_request.return_value.json.return_value = {
             "access_token": "123",
             "email": "alice@posthog.net",
+            "sub": "123",
         }
 
         response = self.client.get(url, follow=True)
@@ -886,6 +898,7 @@ class TestSignupAPI(APIBaseTest):
         mock_request.return_value.json.return_value = {
             "access_token": "123",
             "email": "alice@evil.com",
+            "sub": "123",
         }  # note evil.com
 
         response = self.client.get(url, follow=True)
@@ -911,6 +924,7 @@ class TestSignupAPI(APIBaseTest):
             mock_request.return_value.json.return_value = {
                 "access_token": "123",
                 "email": "jane@hogflix.posthog.com",
+                "sub": "123",
             }
             response = self.client.get(url, follow=True)
 
@@ -1027,7 +1041,7 @@ class TestInviteSignupAPI(APIBaseTest):
         invite: OrganizationInvite = OrganizationInvite.objects.create(
             target_email="test+59@posthog.com", organization=self.organization
         )
-        invite.created_at = datetime.datetime(2020, 12, 1, tzinfo=ZoneInfo("UTC"))
+        invite.created_at = datetime(2020, 12, 1, tzinfo=ZoneInfo("UTC"))
         invite.save()
 
         response = self.client.get(f"/api/signup/{invite.id}/")
@@ -1073,6 +1087,7 @@ class TestInviteSignupAPI(APIBaseTest):
                 "redirect_url": "/",
                 "is_email_verified": False,
                 "hedgehog_config": None,
+                "role_at_organization": "Engineering",
             },
         )
 
@@ -1090,6 +1105,7 @@ class TestInviteSignupAPI(APIBaseTest):
         # Assert that the user was properly created
         self.assertEqual(user.first_name, "Alice")
         self.assertEqual(user.email, "test+99@posthog.com")
+        self.assertEqual(user.role_at_organization, "Engineering")
 
         # Assert that the sign up event & identify calls were sent to PostHog analytics
         mock_capture.assert_called_once()
@@ -1127,7 +1143,7 @@ class TestInviteSignupAPI(APIBaseTest):
         )
 
         self.organization.available_product_features = [
-            {"key": AvailableFeature.PROJECT_BASED_PERMISSIONING, "name": AvailableFeature.PROJECT_BASED_PERMISSIONING}
+            {"key": AvailableFeature.ADVANCED_PERMISSIONS, "name": AvailableFeature.ADVANCED_PERMISSIONS}
         ]
         self.organization.save()
         self.team.access_control = True
@@ -1170,7 +1186,7 @@ class TestInviteSignupAPI(APIBaseTest):
     def test_api_invite_signup_invite_has_private_project_access(self):
         self.client.logout()
         self.organization.available_product_features = [
-            {"key": AvailableFeature.PROJECT_BASED_PERMISSIONING, "name": AvailableFeature.PROJECT_BASED_PERMISSIONING}
+            {"key": AvailableFeature.ADVANCED_PERMISSIONS, "name": AvailableFeature.ADVANCED_PERMISSIONS}
         ]
         self.organization.save()
         private_project = Team.objects.create(
@@ -1203,7 +1219,7 @@ class TestInviteSignupAPI(APIBaseTest):
     def test_api_invite_signup_private_project_access_team_no_longer_exists(self):
         self.client.logout()
         self.organization.available_product_features = [
-            {"key": AvailableFeature.PROJECT_BASED_PERMISSIONING, "name": AvailableFeature.PROJECT_BASED_PERMISSIONING}
+            {"key": AvailableFeature.ADVANCED_PERMISSIONS, "name": AvailableFeature.ADVANCED_PERMISSIONS}
         ]
         self.organization.save()
         private_project = Team.objects.create(
@@ -1308,7 +1324,7 @@ class TestInviteSignupAPI(APIBaseTest):
     def test_existing_user_can_sign_up_to_a_new_organization(
         self, mock_update_billing_organization_users, mock_capture
     ):
-        user = self._create_user("test+159@posthog.com", VALID_TEST_PASSWORD)
+        user = self._create_user("test+159@posthog.com", VALID_TEST_PASSWORD, role_at_organization="product")
         new_org = Organization.objects.create(name="TestCo")
         new_team = Team.objects.create(organization=new_org)
         invite: OrganizationInvite = OrganizationInvite.objects.create(
@@ -1327,7 +1343,7 @@ class TestInviteSignupAPI(APIBaseTest):
             super(LicenseManager, cast(LicenseManager, License.objects)).create(
                 key="key_123",
                 plan="enterprise",
-                valid_until=timezone.datetime(2038, 1, 19, 3, 14, 7),
+                valid_until=datetime(2038, 1, 19, 3, 14, 7),
             )
 
         with self.is_cloud(True):
@@ -1345,6 +1361,7 @@ class TestInviteSignupAPI(APIBaseTest):
                 "redirect_url": "/",
                 "is_email_verified": None,
                 "hedgehog_config": None,
+                "role_at_organization": "product",
             },
         )
 
@@ -1364,6 +1381,7 @@ class TestInviteSignupAPI(APIBaseTest):
         self.assertEqual(user.first_name, "")
         self.assertEqual(user.email, "test+159@posthog.com")
         self.assertFalse(user.is_staff)  # Not first user in the instance
+        self.assertEqual(user.role_at_organization, "product")
 
         # Assert that the sign up event & identify calls were sent to PostHog analytics
         mock_capture.assert_called_once_with(
@@ -1422,6 +1440,7 @@ class TestInviteSignupAPI(APIBaseTest):
                 "redirect_url": "/",
                 "is_email_verified": None,
                 "hedgehog_config": None,
+                "role_at_organization": None,
             },  # note the unchanged attributes
         )
 
@@ -1536,7 +1555,7 @@ class TestInviteSignupAPI(APIBaseTest):
         invite: OrganizationInvite = OrganizationInvite.objects.create(
             target_email="test+799@posthog.com", organization=self.organization
         )
-        invite.created_at = datetime.datetime(2020, 3, 3, tzinfo=ZoneInfo("UTC"))
+        invite.created_at = datetime(2020, 3, 3, tzinfo=ZoneInfo("UTC"))
         invite.save()
 
         response = self.client.post(

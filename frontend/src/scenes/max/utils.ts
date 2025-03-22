@@ -1,17 +1,24 @@
 import {
-    AssistantFunnelsQuery,
     AssistantMessage,
     AssistantMessageType,
-    AssistantTrendsQuery,
     FailureMessage,
-    FunnelsQuery,
     HumanMessage,
+    ReasoningMessage,
     RootAssistantMessage,
-    RouterMessage,
-    TrendsQuery,
     VisualizationMessage,
-} from '~/queries/schema'
-import { isTrendsQuery } from '~/queries/utils'
+} from '~/queries/schema/schema-assistant-messages'
+import {
+    AssistantFunnelsQuery,
+    AssistantHogQLQuery,
+    AssistantRetentionQuery,
+    AssistantTrendsQuery,
+} from '~/queries/schema/schema-assistant-queries'
+import { FunnelsQuery, HogQLQuery, RetentionQuery, TrendsQuery } from '~/queries/schema/schema-general'
+import { isFunnelsQuery, isHogQLQuery, isRetentionQuery, isTrendsQuery } from '~/queries/utils'
+
+export function isReasoningMessage(message: RootAssistantMessage | undefined | null): message is ReasoningMessage {
+    return message?.type === AssistantMessageType.Reasoning
+}
 
 export function isVisualizationMessage(
     message: RootAssistantMessage | undefined | null
@@ -31,29 +38,31 @@ export function isFailureMessage(message: RootAssistantMessage | undefined | nul
     return message?.type === AssistantMessageType.Failure
 }
 
-export function isRouterMessage(message: RootAssistantMessage | undefined | null): message is RouterMessage {
-    return message?.type === AssistantMessageType.Router
-}
-
-// Both schemas below must infer correct types, so the assistant queries can be converted to a regular query.
-/**
- * Type cast for the assistant's trends query.
- */
-export function castAssistantTrendsQuery(query: AssistantTrendsQuery): TrendsQuery {
+// The cast function below look like no-ops, but they're here to ensure AssistantFooQuery types stay compatible
+// with their respective FooQuery types. If an incompatibility arises, TypeScript will shout here
+function castAssistantTrendsQuery(query: AssistantTrendsQuery): TrendsQuery {
     return query
 }
-
-/**
- * Type cast for the assistant's funnels query.
- */
-export function castAssistantFunnelsQuery(query: AssistantFunnelsQuery): FunnelsQuery {
+function castAssistantFunnelsQuery(query: AssistantFunnelsQuery): FunnelsQuery {
     return query
 }
-
-export function castAssistantQuery(query: AssistantTrendsQuery | AssistantFunnelsQuery): TrendsQuery | FunnelsQuery {
+function castAssistantRetentionQuery(query: AssistantRetentionQuery): RetentionQuery {
+    return query
+}
+function castAssistantHogQLQuery(query: AssistantHogQLQuery): HogQLQuery {
+    return query
+}
+export function castAssistantQuery(
+    query: AssistantTrendsQuery | AssistantFunnelsQuery | AssistantRetentionQuery | AssistantHogQLQuery
+): TrendsQuery | FunnelsQuery | RetentionQuery | HogQLQuery {
     if (isTrendsQuery(query)) {
         return castAssistantTrendsQuery(query)
+    } else if (isFunnelsQuery(query)) {
+        return castAssistantFunnelsQuery(query)
+    } else if (isRetentionQuery(query)) {
+        return castAssistantRetentionQuery(query)
+    } else if (isHogQLQuery(query)) {
+        return castAssistantHogQLQuery(query)
     }
-
-    return castAssistantFunnelsQuery(query as AssistantFunnelsQuery)
+    throw new Error(`Unsupported query type: ${query.kind}`)
 }

@@ -1,9 +1,8 @@
+use crate::client::database::CustomDatabaseError;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
+use common_redis::CustomRedisError;
 use thiserror::Error;
-
-use crate::client::database::CustomDatabaseError;
-use crate::client::redis::CustomRedisError;
 
 #[derive(Error, Debug)]
 pub enum ClientFacingError {
@@ -13,6 +12,8 @@ pub enum ClientFacingError {
     Unauthorized(String),
     #[error("Rate limited")]
     RateLimited,
+    #[error("billing limit reached")]
+    BillingLimit,
     #[error("Service unavailable")]
     ServiceUnavailable,
 }
@@ -39,6 +40,8 @@ pub enum FlagError {
     RowNotFound,
     #[error("failed to parse redis cache data")]
     RedisDataParsingError,
+    #[error("failed to deserialize filters")]
+    DeserializeFiltersError,
     #[error("failed to update redis cache")]
     CacheUpdateError,
     #[error("redis unavailable")]
@@ -67,6 +70,7 @@ impl IntoResponse for FlagError {
             FlagError::ClientFacing(err) => match err {
                 ClientFacingError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg),
                 ClientFacingError::Unauthorized(msg) => (StatusCode::UNAUTHORIZED, msg),
+                ClientFacingError::BillingLimit => (StatusCode::PAYMENT_REQUIRED, "Billing limit reached. Please upgrade your plan.".to_string()),
                 ClientFacingError::RateLimited => (StatusCode::TOO_MANY_REQUESTS, "Rate limit exceeded. Please reduce your request frequency and try again later.".to_string()),
                 ClientFacingError::ServiceUnavailable => (StatusCode::SERVICE_UNAVAILABLE, "Service is currently unavailable. Please try again later.".to_string()),
             },
@@ -107,6 +111,13 @@ impl IntoResponse for FlagError {
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "Failed to update internal cache. This is likely a temporary issue. Please try again later.".to_string(),
+                )
+            }
+            FlagError::DeserializeFiltersError => {
+                tracing::error!("Failed to deserialize filters");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to deserialize property filters. This is likely a temporary issue. Please try again later.".to_string(),
                 )
             }
             FlagError::RedisUnavailable => {
@@ -176,10 +187,10 @@ impl From<CustomRedisError> for FlagError {
         match e {
             CustomRedisError::NotFound => FlagError::TokenValidationError,
             CustomRedisError::PickleError(e) => {
-                tracing::error!("failed to fetch data: {}", e);
+                tracing::error!("failed to fetch data from redis: {}", e);
                 FlagError::RedisDataParsingError
             }
-            CustomRedisError::Timeout(_) => FlagError::TimeoutError,
+            CustomRedisError::Timeout => FlagError::TimeoutError,
             CustomRedisError::Other(e) => {
                 tracing::error!("Unknown redis error: {}", e);
                 FlagError::RedisUnavailable

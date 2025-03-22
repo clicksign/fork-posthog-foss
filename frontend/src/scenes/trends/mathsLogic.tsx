@@ -1,9 +1,9 @@
 import { connect, kea, path, selectors } from 'kea'
-import { FEATURE_FLAGS } from 'lib/constants'
 import { groupsAccessLogic } from 'lib/introductions/groupsAccessLogic'
 import { featureFlagLogic } from 'lib/logic/featureFlagLogic'
 
 import { groupsModel } from '~/models/groupsModel'
+import { MathType } from '~/queries/schema/schema-general'
 import { BaseMathType, CountPerActorMathType, FunnelMathType, HogQLMathType, PropertyMathType } from '~/types'
 
 import type { mathsLogicType } from './mathsLogicType'
@@ -37,8 +37,8 @@ export const FUNNEL_MATH_DEFINITIONS: Record<FunnelMathType, MathDefinition> = {
         shortName: 'first event',
         description: (
             <>
-                Only the first time the user performed this event will count towards the funnel, and only if it matches
-                the event filters.
+                Matches only the first time the user performed this event type. If this event does not match the event
+                filters, or is outside the selected date range, the user will be excluded from the funnel.
                 <br />
                 <br />
                 <i>
@@ -54,8 +54,9 @@ export const FUNNEL_MATH_DEFINITIONS: Record<FunnelMathType, MathDefinition> = {
         shortName: 'first matching event',
         description: (
             <>
-                The first time the user performed this event that matches the event filters will count towards the
-                funnel.
+                Matches only the first time the user performed this event type with the selected filters. If this event
+                is outside the selected date range, or the user never performed the event with the selected filters, the
+                user will be excluded from the funnel.
                 <br />
                 <br />
                 <i>
@@ -103,10 +104,14 @@ export const BASE_MATH_DEFINITIONS: Record<BaseMathType, MathDefinition> = {
         shortName: 'WAUs',
         description: (
             <>
-                Users active in the past week (7 days).
+                <b>Users active in the past week (7 days).</b>
+                <br />
                 <br />
                 This is a trailing count that aggregates distinct users in the past 7 days for each day in the time
-                series
+                series.
+                <br />
+                <br />
+                If the group by interval is a week or longer, this is the same as "Unique User" math.
             </>
         ),
         category: MathCategory.ActorCount,
@@ -116,10 +121,14 @@ export const BASE_MATH_DEFINITIONS: Record<BaseMathType, MathDefinition> = {
         shortName: 'MAUs',
         description: (
             <>
-                Users active in the past month (30 days).
+                <b>Users active in the past month (30 days).</b>
+                <br />
                 <br />
                 This is a trailing count that aggregates distinct users in the past 30 days for each day in the time
                 series
+                <br />
+                <br />
+                If the group by interval is a month or longer, this is the same as "Unique User" math.
             </>
         ),
         category: MathCategory.ActorCount,
@@ -145,12 +154,32 @@ export const BASE_MATH_DEFINITIONS: Record<BaseMathType, MathDefinition> = {
         shortName: 'first time',
         description: (
             <>
-                Only count events if users do it for the first time.
+                Matches only the first time the user performed this event type. If this event does not match the event
+                filters, or is outside the selected date range, the user will be excluded from the insight.
                 <br />
                 <br />
                 <i>
-                    Example: If a single user performs an event for the first time ever within a given period, it counts
-                    as 1. Subsequent events by the same user will not be counted.
+                    Example: If the we are looking for pageview events to posthog.com/about, but the user's first
+                    pageview was on posthog.com, it will not match, even if they went to posthog.com/about afterwards.
+                </i>
+            </>
+        ),
+        category: MathCategory.EventCount,
+    },
+    [BaseMathType.FirstMatchingEventForUser]: {
+        name: 'First matching event for user',
+        shortName: 'first matching event',
+        description: (
+            <>
+                Matches only the first time the user performed this event type with the selected filters. If this event
+                is outside the selected date range, or the user never performed the event with the selected filters, the
+                user will be excluded from the insight.
+                <br />
+                <br />
+                <i>
+                    Example: If the we are looking for pageview events to posthog.com/about, and the user's first
+                    pageview was on posthog.com but then they navigated to posthog.com/about, it will match the pageview
+                    event from posthog.com/about
                 </i>
             </>
         ),
@@ -224,6 +253,19 @@ export const PROPERTY_MATH_DEFINITIONS: Record<PropertyMathType, MathDefinition>
         ),
         category: MathCategory.PropertyValue,
     },
+    [PropertyMathType.P75]: {
+        name: '75th percentile',
+        shortName: '75th percentile',
+        description: (
+            <>
+                Event property 75th percentile.
+                <br />
+                <br />
+                For example 100 events captured with property <code>amount</code> equal to 101..200, result in 175.
+            </>
+        ),
+        category: MathCategory.PropertyValue,
+    },
     [PropertyMathType.P90]: {
         name: '90th percentile',
         shortName: '90th percentile',
@@ -266,9 +308,9 @@ export const PROPERTY_MATH_DEFINITIONS: Record<PropertyMathType, MathDefinition>
 }
 export const HOGQL_MATH_DEFINITIONS: Record<HogQLMathType, MathDefinition> = {
     [HogQLMathType.HogQL]: {
-        name: 'HogQL expression',
-        shortName: 'HogQL expression',
-        description: <>Aggregate with a custom HogQL expression.</>,
+        name: 'SQL expression',
+        shortName: 'SQL expression',
+        description: <>Aggregate with a custom SQL expression.</>,
         category: MathCategory.HogQLExpression,
     },
 }
@@ -296,6 +338,12 @@ export const COUNT_PER_ACTOR_MATH_DEFINITIONS: Record<CountPerActorMathType, Mat
         name: 'Median',
         shortName: 'median',
         description: <>Event count per actor 50th percentile.</>,
+        category: MathCategory.EventCountPerActor,
+    },
+    [CountPerActorMathType.P75]: {
+        name: '75th percentile',
+        shortName: '75th percentile',
+        description: <>Event count per actor 75th percentile.</>,
         category: MathCategory.EventCountPerActor,
     },
     [CountPerActorMathType.P90]: {
@@ -352,52 +400,52 @@ export const mathsLogic = kea<mathsLogicType>([
     }),
     selectors({
         mathDefinitions: [
-            (s) => [s.groupsMathDefinitions, s.featureFlags],
-            (groupsMathDefinitions, featureFlags): Record<string, MathDefinition> => {
-                const allMathDefinitions: Record<string, MathDefinition> = {
+            (s) => [s.groupsMathDefinitions],
+            (groupsMathDefinitions): Partial<Record<MathType, MathDefinition>> => {
+                const allMathDefinitions: Partial<Record<MathType, MathDefinition>> = {
                     ...BASE_MATH_DEFINITIONS,
                     ...groupsMathDefinitions,
                     ...PROPERTY_MATH_DEFINITIONS,
                     ...COUNT_PER_ACTOR_MATH_DEFINITIONS,
                     ...HOGQL_MATH_DEFINITIONS,
                 }
-                return filterMathTypesUnderFeatureFlags(allMathDefinitions, featureFlags)
+                return allMathDefinitions
             },
         ],
         funnelMathDefinitions: [
-            (s) => [s.featureFlags],
-            (featureFlags): Record<string, MathDefinition> => {
-                const funnelMathDefinitions: Record<string, MathDefinition> = {
+            () => [],
+            (): Partial<Record<MathType, MathDefinition>> => {
+                const funnelMathDefinitions: Partial<Record<MathType, MathDefinition>> = {
                     ...FUNNEL_MATH_DEFINITIONS,
                 }
-                return filterMathTypesUnderFeatureFlags(funnelMathDefinitions, featureFlags)
+                return funnelMathDefinitions
             },
         ],
         // Static means the options do not have nested selectors (like math function)
         staticMathDefinitions: [
-            (s) => [s.groupsMathDefinitions, s.needsUpgradeForGroups, s.featureFlags],
-            (groupsMathDefinitions, needsUpgradeForGroups, featureFlags): Record<string, MathDefinition> => {
-                const staticMathDefinitions: Record<string, MathDefinition> = {
+            (s) => [s.groupsMathDefinitions, s.needsUpgradeForGroups],
+            (groupsMathDefinitions, needsUpgradeForGroups): Partial<Record<MathType, MathDefinition>> => {
+                const staticMathDefinitions: Partial<Record<MathType, MathDefinition>> = {
                     ...BASE_MATH_DEFINITIONS,
                     ...(!needsUpgradeForGroups ? groupsMathDefinitions : {}),
                 }
-                return filterMathTypesUnderFeatureFlags(staticMathDefinitions, featureFlags)
+                return staticMathDefinitions
             },
         ],
         staticActorsOnlyMathDefinitions: [
             (s) => [s.staticMathDefinitions],
-            (staticMathDefinitions): Record<string, MathDefinition> => {
+            (staticMathDefinitions): Partial<Record<MathType, MathDefinition>> => {
                 return Object.fromEntries(
                     Object.entries(staticMathDefinitions).filter(
                         ([, mathDefinition]) => mathDefinition.category === MathCategory.ActorCount
                     )
-                )
+                ) as Partial<Record<MathType, MathDefinition>>
             },
         ],
         // Definitions based on group types present in the project
         groupsMathDefinitions: [
             (s) => [s.groupTypes, s.aggregationLabel],
-            (groupTypes, aggregationLabel) =>
+            (groupTypes, aggregationLabel): Partial<Record<MathType, MathDefinition>> =>
                 Object.fromEntries(
                     Array.from(groupTypes.values())
                         .map((groupType) => [
@@ -426,14 +474,3 @@ export const mathsLogic = kea<mathsLogicType>([
         ],
     }),
 ])
-
-export function filterMathTypesUnderFeatureFlags(
-    mathDefinitions: Record<string, MathDefinition>,
-    featureFlags: Record<string, boolean | string>
-): Record<string, MathDefinition> {
-    const copy = { ...mathDefinitions }
-    if (!featureFlags[FEATURE_FLAGS.FIRST_TIME_FOR_USER_MATH]) {
-        delete copy[BaseMathType.FirstTimeForUser]
-    }
-    return copy
-}

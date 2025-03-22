@@ -1,23 +1,36 @@
 import dataclasses
+import typing as t
 
 from django.db import close_old_connections
 from temporalio import activity
 
 from posthog.temporal.common.logger import bind_temporal_worker_logger_sync
-from posthog.temporal.data_imports.pipelines.schemas import PIPELINE_TYPE_SCHEMA_DEFAULT_MAPPING
-
-from posthog.warehouse.models import sync_old_schemas_with_new_schemas, ExternalDataSource
+from posthog.temporal.data_imports.pipelines.schemas import (
+    PIPELINE_TYPE_SCHEMA_DEFAULT_MAPPING,
+)
+from posthog.warehouse.models import (
+    ExternalDataSource,
+    sync_old_schemas_with_new_schemas,
+)
 from posthog.warehouse.models.external_data_schema import (
-    get_sql_schemas_for_source_type,
     get_snowflake_schemas,
+    get_sql_schemas_for_source_type,
 )
 from posthog.warehouse.models.ssh_tunnel import SSHTunnel
+from posthog.temporal.data_imports.pipelines.bigquery import get_schemas as get_bigquery_schemas
 
 
 @dataclasses.dataclass
 class SyncNewSchemasActivityInputs:
     source_id: str
     team_id: int
+
+    @property
+    def properties_to_log(self) -> dict[str, t.Any]:
+        return {
+            "source_id": self.source_id,
+            "team_id": self.team_id,
+        }
 
 
 @activity.defn
@@ -55,6 +68,8 @@ def sync_new_schemas_activity(inputs: SyncNewSchemasActivityInputs) -> None:
         ssh_tunnel_auth_type_passphrase = source.job_inputs.get("ssh_tunnel_auth_type_passphrase")
         ssh_tunnel_auth_type_private_key = source.job_inputs.get("ssh_tunnel_auth_type_private_key")
 
+        using_ssl = str(source.job_inputs.get("using_ssl", True)) == "True"
+
         ssh_tunnel = SSHTunnel(
             enabled=using_ssh_tunnel,
             host=ssh_tunnel_host,
@@ -67,7 +82,15 @@ def sync_new_schemas_activity(inputs: SyncNewSchemasActivityInputs) -> None:
         )
 
         sql_schemas = get_sql_schemas_for_source_type(
-            ExternalDataSource.Type(source.source_type), host, port, database, user, password, db_schema, ssh_tunnel
+            ExternalDataSource.Type(source.source_type),
+            host,
+            port,
+            database,
+            user,
+            password,
+            db_schema,
+            ssh_tunnel,
+            using_ssl,
         )
 
         schemas_to_sync = list(sql_schemas.keys())
@@ -76,16 +99,52 @@ def sync_new_schemas_activity(inputs: SyncNewSchemasActivityInputs) -> None:
             return
 
         account_id = source.job_inputs.get("account_id")
-        user = source.job_inputs.get("user")
-        password = source.job_inputs.get("password")
         database = source.job_inputs.get("database")
         warehouse = source.job_inputs.get("warehouse")
         sf_schema = source.job_inputs.get("schema")
         role = source.job_inputs.get("role")
 
-        sql_schemas = get_snowflake_schemas(account_id, database, warehouse, user, password, sf_schema, role)
+        auth_type = source.job_inputs.get("auth_type", "password")
+        auth_type_username = source.job_inputs.get("user")
+        auth_type_password = source.job_inputs.get("password")
+        auth_type_passphrase = source.job_inputs.get("passphrase")
+        auth_type_private_key = source.job_inputs.get("private_key")
+
+        sql_schemas = get_snowflake_schemas(
+            account_id=account_id,
+            database=database,
+            warehouse=warehouse,
+            user=auth_type_username,
+            password=auth_type_password,
+            schema=sf_schema,
+            role=role,
+            auth_type=auth_type,
+            passphrase=auth_type_passphrase,
+            private_key=auth_type_private_key,
+        )
 
         schemas_to_sync = list(sql_schemas.keys())
+    elif source.source_type == ExternalDataSource.Type.BIGQUERY:
+        if not source.job_inputs:
+            return
+
+        dataset_id = source.job_inputs.get("dataset_id")
+        project_id = source.job_inputs.get("project_id")
+        private_key = source.job_inputs.get("private_key")
+        private_key_id = source.job_inputs.get("private_key_id")
+        client_email = source.job_inputs.get("client_email")
+        token_uri = source.job_inputs.get("token_uri")
+
+        bq_schemas = get_bigquery_schemas(
+            dataset_id=dataset_id,
+            project_id=project_id,
+            private_key=private_key,
+            private_key_id=private_key_id,
+            client_email=client_email,
+            token_uri=token_uri,
+        )
+
+        schemas_to_sync = list(bq_schemas.keys())
     else:
         schemas_to_sync = list(PIPELINE_TYPE_SCHEMA_DEFAULT_MAPPING.get(source.source_type, ()))
 

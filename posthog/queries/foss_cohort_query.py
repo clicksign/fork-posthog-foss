@@ -179,7 +179,10 @@ class FOSSCohortQuery(EventQuery):
 
     @staticmethod
     def unwrap_cohort(filter: Filter, team_id: int) -> Filter:
+        team: Optional[Team] = None
+
         def _unwrap(property_group: PropertyGroup, negate_group: bool = False) -> PropertyGroup:
+            nonlocal team
             if len(property_group.values):
                 if isinstance(property_group.values[0], PropertyGroup):
                     # dealing with a list of property groups, so unwrap each one
@@ -211,7 +214,11 @@ class FOSSCohortQuery(EventQuery):
                         negation_value = not current_negation if negate_group else current_negation
                         if prop.type in ["cohort", "precalculated-cohort"]:
                             try:
-                                prop_cohort: Cohort = Cohort.objects.get(pk=prop.value, team_id=team_id)
+                                if team is None:  # This ensures we only fetch team if needed, but never more than once
+                                    team = Team.objects.get(pk=team_id)
+                                prop_cohort: Cohort = Cohort.objects.get(
+                                    pk=prop.value, team__project_id=team.project_id
+                                )
                                 if prop_cohort.is_static:
                                     new_property_group_list.append(
                                         PropertyGroup(
@@ -235,7 +242,7 @@ class FOSSCohortQuery(EventQuery):
                                         values=[
                                             Property(
                                                 key="fake_key_01r2ho",
-                                                value=0,
+                                                value="0",
                                                 type="person",
                                             )
                                         ],
@@ -340,9 +347,17 @@ class FOSSCohortQuery(EventQuery):
 
         query, params = "", {}
         if self._should_join_behavioral_query:
-            _fields = [
-                f"{self.DISTINCT_ID_TABLE_ALIAS if self._person_on_events_mode == PersonsOnEventsMode.DISABLED else self.EVENT_TABLE_ALIAS}.person_id AS person_id"
-            ]
+            _fields = []
+            if not self._should_join_distinct_ids:
+                _fields.append(f"{self.EVENT_TABLE_ALIAS}.person_id AS person_id")
+            elif self._person_on_events_mode == PersonsOnEventsMode.PERSON_ID_OVERRIDE_PROPERTIES_ON_EVENTS:
+                _fields.append(
+                    f"if(not(empty({self.PERSON_ID_OVERRIDES_TABLE_ALIAS}.distinct_id)), {self.PERSON_ID_OVERRIDES_TABLE_ALIAS}.person_id, {self.EVENT_TABLE_ALIAS}.person_id) AS person_id"
+                )
+            else:
+                _fields.append(
+                    f"if(not(empty({self.DISTINCT_ID_TABLE_ALIAS}.distinct_id)), {self.DISTINCT_ID_TABLE_ALIAS}.person_id, {self.EVENT_TABLE_ALIAS}.person_id) AS person_id"
+                )
             _fields.extend(self._fields)
 
             if self.should_pushdown_persons and self._person_on_events_mode != PersonsOnEventsMode.DISABLED:
@@ -353,11 +368,16 @@ class FOSSCohortQuery(EventQuery):
                 )
 
             date_condition, date_params = self._get_date_condition()
+            if len(self._events) > 0:
+                event_condition = f"AND event IN %({event_param_name})s"
+            else:
+                event_condition = ""
+
             query = f"""
             SELECT {", ".join(_fields)} FROM events {self.EVENT_TABLE_ALIAS}
             {self._get_person_ids_query()}
             WHERE team_id = %(team_id)s
-            AND event IN %({event_param_name})s
+            {event_condition}
             {date_condition}
             {person_prop_query}
             GROUP BY person_id

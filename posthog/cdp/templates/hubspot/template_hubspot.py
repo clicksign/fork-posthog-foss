@@ -6,6 +6,7 @@ from posthog.cdp.templates.hog_function_template import HogFunctionTemplate, Hog
 
 template: HogFunctionTemplate = HogFunctionTemplate(
     status="beta",
+    free=False,
     type="destination",
     id="template-hubspot",
     name="Hubspot",
@@ -61,6 +62,7 @@ if (res.status == 200) {
             "type": "integration",
             "integration": "hubspot",
             "label": "Hubspot connection",
+            "requiredScopes": "crm.objects.contacts.write crm.objects.contacts.read",
             "secret": False,
             "required": True,
         },
@@ -98,6 +100,7 @@ if (res.status == 200) {
 
 template_event: HogFunctionTemplate = HogFunctionTemplate(
     status="beta",
+    free=False,
     id="template-hubspot-event",
     type="destination",
     name="Hubspot",
@@ -307,6 +310,7 @@ if (res.status >= 400) {
             "type": "integration",
             "integration": "hubspot",
             "label": "Hubspot connection",
+            "requiredScopes": "analytics.behavioral_events.send behavioral_events.event_definitions.read_write",
             "secret": False,
             "required": True,
         },

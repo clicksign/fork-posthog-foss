@@ -1,7 +1,8 @@
 import { IconLock } from '@posthog/icons'
-import { LemonDialog, LemonInput, LemonSelect, LemonTag } from '@posthog/lemon-ui'
+import { LemonDialog, LemonInput, LemonSelect, LemonTag, lemonToast } from '@posthog/lemon-ui'
 import { useActions, useValues } from 'kea'
 import { router } from 'kea-router'
+import { AccessControlledLemonButton } from 'lib/components/AccessControlledLemonButton'
 import { ActivityLog } from 'lib/components/ActivityLog/ActivityLog'
 import { FeatureFlagHog } from 'lib/components/hedgehogs'
 import { MemberSelect } from 'lib/components/MemberSelect'
@@ -20,13 +21,14 @@ import { Tooltip } from 'lib/lemon-ui/Tooltip'
 import { copyToClipboard } from 'lib/utils/copyToClipboard'
 import { deleteWithUndo } from 'lib/utils/deleteWithUndo'
 import stringWithWBR from 'lib/utils/stringWithWBR'
+import { projectLogic } from 'scenes/projectLogic'
 import { SceneExport } from 'scenes/sceneTypes'
 import { urls } from 'scenes/urls'
 import { userLogic } from 'scenes/userLogic'
 
 import { groupsModel, Noun } from '~/models/groupsModel'
-import { InsightVizNode, NodeKind } from '~/queries/schema'
-import { ProductKey } from '~/types'
+import { InsightVizNode, NodeKind } from '~/queries/schema/schema-general'
+import { AccessControlResourceType, ProductKey } from '~/types'
 import {
     ActivityScope,
     AnyPropertyFilter,
@@ -36,7 +38,6 @@ import {
     FeatureFlagType,
 } from '~/types'
 
-import { teamLogic } from '../teamLogic'
 import { featureFlagsLogic, FeatureFlagsTab, FLAGS_PER_PAGE } from './featureFlagsLogic'
 
 export const scene: SceneExport = {
@@ -53,7 +54,7 @@ export function OverViewTab({
     searchPlaceholder?: string
     nouns?: [string, string]
 }): JSX.Element {
-    const { currentTeamId } = useValues(teamLogic)
+    const { currentProjectId } = useValues(projectLogic)
     const { aggregationLabel } = useValues(groupsModel)
 
     const flagLogic = featureFlagsLogic({ flagPrefix })
@@ -84,7 +85,7 @@ export function OverViewTab({
                 },
             },
         }
-        return urls.insightNew(undefined, undefined, query)
+        return urls.insightNew({ query })
     }
 
     const columns: LemonTableColumns<FeatureFlagType> = [
@@ -152,7 +153,7 @@ export function OverViewTab({
             width: 100,
             render: function RenderActive(_, featureFlag: FeatureFlagType) {
                 return (
-                    <>
+                    <div className="flex justify-start gap-1">
                         {featureFlag.performed_rollback ? (
                             <LemonTag type="warning" className="uppercase">
                                 Rolled Back
@@ -166,7 +167,27 @@ export function OverViewTab({
                                 Disabled
                             </LemonTag>
                         )}
-                    </>
+                        {featureFlag.status === 'STALE' && (
+                            <Tooltip
+                                title={
+                                    <>
+                                        <div className="text-sm">Flag at least 30 days old and fully rolled out</div>
+                                        <div className="text-xs">
+                                            Make sure to remove any references to this flag in your code before deleting
+                                            it.
+                                        </div>
+                                    </>
+                                }
+                                placement="left"
+                            >
+                                <span>
+                                    <LemonTag type="warning" className="uppercase cursor-default">
+                                        Stale
+                                    </LemonTag>
+                                </span>
+                            </Tooltip>
+                        )}
+                    </div>
                 )
             },
         },
@@ -185,7 +206,11 @@ export function OverViewTab({
                                 >
                                     Copy feature flag key
                                 </LemonButton>
-                                <LemonButton
+
+                                <AccessControlledLemonButton
+                                    userAccessLevel={featureFlag.user_access_level}
+                                    minAccessLevel="editor"
+                                    resourceType={AccessControlResourceType.FeatureFlag}
                                     data-attr={`feature-flag-${featureFlag.key}-switch`}
                                     onClick={() => {
                                         const newValue = !featureFlag.active
@@ -215,13 +240,16 @@ export function OverViewTab({
                                         })
                                     }}
                                     id={`feature-flag-${featureFlag.id}-switch`}
-                                    disabled={!featureFlag.can_edit}
                                     fullWidth
                                 >
                                     {featureFlag.active ? 'Disable' : 'Enable'} feature flag
-                                </LemonButton>
+                                </AccessControlledLemonButton>
+
                                 {featureFlag.id && (
-                                    <LemonButton
+                                    <AccessControlledLemonButton
+                                        userAccessLevel={featureFlag.user_access_level}
+                                        minAccessLevel="editor"
+                                        resourceType={AccessControlResourceType.FeatureFlag}
                                         fullWidth
                                         disabled={!featureFlag.can_edit}
                                         onClick={() =>
@@ -229,20 +257,36 @@ export function OverViewTab({
                                         }
                                     >
                                         Edit
-                                    </LemonButton>
+                                    </AccessControlledLemonButton>
                                 )}
+
+                                <LemonButton
+                                    to={urls.featureFlagDuplicate(featureFlag.id)}
+                                    data-attr="feature-flag-duplicate"
+                                    fullWidth
+                                >
+                                    Duplicate feature flag
+                                </LemonButton>
+
                                 <LemonButton to={tryInInsightsUrl(featureFlag)} data-attr="usage" fullWidth>
                                     Try out in Insights
                                 </LemonButton>
+
                                 <LemonDivider />
+
                                 {featureFlag.id && (
-                                    <LemonButton
+                                    <AccessControlledLemonButton
+                                        userAccessLevel={featureFlag.user_access_level}
+                                        minAccessLevel="editor"
+                                        resourceType={AccessControlResourceType.FeatureFlag}
                                         status="danger"
                                         onClick={() => {
                                             void deleteWithUndo({
-                                                endpoint: `projects/${currentTeamId}/feature_flags`,
+                                                endpoint: `projects/${currentProjectId}/feature_flags`,
                                                 object: { name: featureFlag.key, id: featureFlag.id },
                                                 callback: loadFeatureFlags,
+                                            }).catch((e) => {
+                                                lemonToast.error(`Failed to delete feature flag: ${e.detail}`)
                                             })
                                         }}
                                         disabledReason={
@@ -257,7 +301,7 @@ export function OverViewTab({
                                         fullWidth
                                     >
                                         Delete feature flag
-                                    </LemonButton>
+                                    </AccessControlledLemonButton>
                                 )}
                             </>
                         }
@@ -305,6 +349,7 @@ export function OverViewTab({
                             'data-attr': 'feature-flag-select-type-option-multiple-variants',
                         },
                         { label: 'Experiment', value: 'experiment' },
+                        { label: 'Remote config', value: 'remote_config' },
                     ]}
                     value={filters.type ?? 'all'}
                     data-attr="feature-flag-select-type"
@@ -374,7 +419,7 @@ export function OverViewTab({
             <div>{filtersSection}</div>
             <LemonDivider className="my-4" />
             <div className="mb-4">
-                <span className="text-muted-alt ">
+                <span className="text-secondary ">
                     {count
                         ? `${startCount}${endCount - startCount > 1 ? '-' + endCount : ''} of ${count} flag${
                               count === 1 ? '' : 's'

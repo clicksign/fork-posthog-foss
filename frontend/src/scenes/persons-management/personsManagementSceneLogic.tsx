@@ -31,7 +31,7 @@ export type PersonsManagementTabs = Record<
 export const personsManagementSceneLogic = kea<personsManagementSceneLogicType>([
     path(['scenes', 'persons-management', 'personsManagementSceneLogic']),
     connect({
-        values: [groupsModel, ['aggregationLabel', 'groupTypes', 'groupsAccessStatus', 'aggregationLabel']],
+        values: [groupsModel, ['aggregationLabel', 'groupTypes', 'groupTypesLoading', 'groupsAccessStatus']],
     }),
     actions({
         setTabKey: (tabKey: string) => ({ tabKey }),
@@ -52,7 +52,7 @@ export const personsManagementSceneLogic = kea<personsManagementSceneLogicType>(
                     {
                         key: 'persons',
                         url: urls.persons(),
-                        label: 'People & groups',
+                        label: 'Persons',
                         content: <Persons />,
                     },
                     {
@@ -137,7 +137,18 @@ export const personsManagementSceneLogic = kea<personsManagementSceneLogicType>(
     }),
     actionToUrl(({ values }) => ({
         setTabKey: ({ tabKey }) => {
-            return values.tabs.find((x) => x.key === tabKey)?.url || values.tabs[0].url
+            let tabUrl = values.tabs.find((x) => x.key === tabKey)?.url
+            if (!tabUrl && values.groupTypesLoading) {
+                const groupMatch = tabKey.match(/^groups-(\d+)$/)
+                if (groupMatch) {
+                    tabUrl = urls.groups(parseInt(groupMatch[1]))
+                }
+            }
+            if (!tabUrl) {
+                return values.tabs[0].url
+            }
+            // Preserve existing search params when changing tabs
+            return [tabUrl, router.values.searchParams, router.values.hashParams, { replace: true }]
         },
     })),
     urlToAction(({ actions }) => {

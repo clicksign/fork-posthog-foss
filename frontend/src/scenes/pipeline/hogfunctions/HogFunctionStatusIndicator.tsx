@@ -64,17 +64,22 @@ export function HogFunctionStatusIndicator({ hogFunction }: HogFunctionStatusInd
         return null
     }
 
-    const { tagType, display, description } = hogFunction.status?.state
-        ? displayMap[hogFunction.status.state]
-        : hogFunction.enabled
-        ? DEFAULT_DISPLAY
-        : DISABLED_MANUALLY_DISPLAY
+    const { tagType, display, description } =
+        hogFunction.type === 'site_app' || hogFunction.type === 'site_destination'
+            ? hogFunction.enabled
+                ? displayMap[HogWatcherState.healthy]
+                : DISABLED_MANUALLY_DISPLAY
+            : hogFunction.status?.state
+            ? displayMap[hogFunction.status.state]
+            : hogFunction.enabled
+            ? DEFAULT_DISPLAY
+            : DISABLED_MANUALLY_DISPLAY
 
     return (
         <LemonDropdown
             overlay={
                 <>
-                    <div className="p-2 space-y-2">
+                    <div className="p-2 deprecated-space-y-2">
                         <h2 className="flex items-center m-0 gap-2">
                             Function status - <LemonTag type={tagType}>{display}</LemonTag>
                         </h2>

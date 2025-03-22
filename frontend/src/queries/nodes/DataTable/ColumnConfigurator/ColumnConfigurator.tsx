@@ -21,7 +21,7 @@ import { useState } from 'react'
 import { AutoSizer } from 'react-virtualized/dist/es/AutoSizer'
 
 import { dataTableLogic } from '~/queries/nodes/DataTable/dataTableLogic'
-import { DataTableNode, NodeKind } from '~/queries/schema'
+import { DataTableNode, NodeKind } from '~/queries/schema/schema-general'
 import { isEventsQuery, taxonomicEventFilterToHogQL, trimQuotes } from '~/queries/utils'
 import { PropertyFilterType } from '~/types'
 
@@ -67,6 +67,7 @@ export function ColumnConfigurator({ query, setQuery }: ColumnConfiguratorProps)
                 setQuery?.({ ...query, columns })
             }
         },
+        context: query.context || { type: 'team_columns' },
     }
     const { showModal } = useActions(columnConfiguratorLogic(columnConfiguratorLogicProps))
 
@@ -93,6 +94,7 @@ function ColumnConfiguratorModal({ query }: ColumnConfiguratorProps): JSX.Elemen
     const { modalVisible, columns, saveAsDefault } = useValues(columnConfiguratorLogic)
     const { hideModal, moveColumn, setColumns, selectColumn, unselectColumn, save, toggleSaveAsDefault } =
         useActions(columnConfiguratorLogic)
+    const { context } = useValues(columnConfiguratorLogic)
 
     const onEditColumn = (column: string, index: number): void => {
         const newColumn = window.prompt('Edit column', column)
@@ -128,7 +130,7 @@ function ColumnConfiguratorModal({ query }: ColumnConfiguratorProps): JSX.Elemen
             <div className="ColumnConfiguratorModal">
                 <div className="Columns">
                     <div className="HalfColumn">
-                        <h4 className="secondary uppercase text-muted">
+                        <h4 className="secondary uppercase text-secondary">
                             Visible columns ({columns.length}) - Drag to reorder
                         </h4>
                         <DndContext
@@ -156,7 +158,7 @@ function ColumnConfiguratorModal({ query }: ColumnConfiguratorProps): JSX.Elemen
                         </DndContext>
                     </div>
                     <div className="HalfColumn">
-                        <h4 className="secondary uppercase text-muted">Available columns</h4>
+                        <h4 className="secondary uppercase text-secondary">Available columns</h4>
                         <div className="h-[360px]">
                             <AutoSizer>
                                 {({ height, width }: { height: number; width: number }) => (
@@ -188,7 +190,11 @@ function ColumnConfiguratorModal({ query }: ColumnConfiguratorProps): JSX.Elemen
                 </div>
                 {isEventsQuery(query.source) && query.showPersistentColumnConfigurator ? (
                     <LemonCheckbox
-                        label="Save as default for all project members"
+                        label={
+                            context?.type === 'event_definition'
+                                ? 'Save as default columns for this event type'
+                                : 'Save as default for all project members'
+                        }
                         className="mt-2"
                         data-attr="events-table-save-columns-as-default-toggle"
                         bordered

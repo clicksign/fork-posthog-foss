@@ -21,7 +21,7 @@ import {
     InsightActorsQueryOptionsResponse,
     insightActorsQueryOptionsResponseKeys,
     NodeKind,
-} from '~/queries/schema'
+} from '~/queries/schema/schema-general'
 import {
     ActorType,
     BreakdownType,
@@ -175,7 +175,7 @@ export const personsModalLogic = kea<personsModalLogicType>([
                         kind: NodeKind.InsightActorsQueryOptions,
                         source: query,
                     }
-                    const response = await performQuery(optionsQuery, { async: false })
+                    const response = await performQuery(optionsQuery, {}, 'blocking')
 
                     return Object.fromEntries(
                         Object.entries(response).filter(([key, _]) =>
@@ -331,7 +331,7 @@ export const personsModalLogic = kea<personsModalLogicType>([
             () => [(_, p) => p.additionalSelect],
             (additionalSelect: PersonModalLogicProps['additionalSelect']): string[] => {
                 const extra = Object.values(additionalSelect || {})
-                return ['actor', 'created_at', ...extra]
+                return ['actor', ...extra]
             },
         ],
         actorsQuery: [
@@ -344,7 +344,7 @@ export const personsModalLogic = kea<personsModalLogicType>([
                     kind: NodeKind.ActorsQuery,
                     source: query,
                     select: selectFields,
-                    orderBy: orderBy || ['created_at DESC'],
+                    orderBy: orderBy || [],
                     search: searchTerm,
                 }
             },
@@ -361,7 +361,40 @@ export const personsModalLogic = kea<personsModalLogicType>([
                     source,
                     full: true,
                 }
-                return urls.insightNew(undefined, undefined, query)
+                return urls.insightNew({ query })
+            },
+        ],
+        insightEventsQueryUrl: [
+            (s) => [s.actorsQuery],
+            (actorsQuery: ActorsQuery): string | null => {
+                if (!actorsQuery) {
+                    return null
+                }
+
+                // Generate insight events query from actors query
+                const { select: _select, ...source } = actorsQuery
+
+                const kind =
+                    actorsQuery.source && 'source' in actorsQuery.source ? actorsQuery.source.source?.kind : null
+
+                if (!kind || ![NodeKind.TrendsQuery].includes(kind)) {
+                    return null
+                }
+
+                const { includeRecordings, ...insightActorsQuery } = source.source as InsightActorsQuery
+
+                const query: DataTableNode = {
+                    kind: NodeKind.DataTableNode,
+                    source: {
+                        kind: NodeKind.EventsQuery,
+                        source: insightActorsQuery,
+                        select: ['*', 'event', 'person', 'timestamp'],
+                        after: 'all', // Show all events by default because date range is filtered by the source
+                    },
+                    full: true,
+                }
+
+                return urls.insightNew({ query })
             },
         ],
     }),

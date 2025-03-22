@@ -10,6 +10,7 @@ import { ActionStepType } from '~/types'
 import { ActionStepPropertyKey } from './actions/ActionStep'
 
 export const TOOLBAR_ID = '__POSTHOG_TOOLBAR__'
+export const TOOLBAR_CONTAINER_CLASS = 'toolbar-global-fade-container'
 export const LOCALSTORAGE_KEY = '_postHogToolbarParams'
 
 export function getSafeText(el: HTMLElement): string {
@@ -173,7 +174,10 @@ export function getAllClickTargets(
         .filter((e) => e)
     const uniqueElements = Array.from(new Set(selectedElements)) as HTMLElement[]
 
-    return uniqueElements
+    return uniqueElements.filter((element) => {
+        const style = window.getComputedStyle(element)
+        return style.display !== 'none' && style.visibility !== 'hidden'
+    })
 }
 
 export function stepMatchesHref(step: ActionStepType, href: string): boolean {

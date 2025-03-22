@@ -1,14 +1,14 @@
 import { actions, afterMount, kea, listeners, path, reducers, selectors } from 'kea'
 import { forms } from 'kea-forms'
 import { loaders } from 'kea-loaders'
-import { urlToAction } from 'kea-router'
 import api from 'lib/api'
 import { DashboardCompatibleScenes } from 'lib/components/SceneDashboardChoice/sceneDashboardChoiceModalLogic'
 import { lemonToast } from 'lib/lemon-ui/LemonToast/LemonToast'
 import { getAppContext } from 'lib/utils/getAppContext'
 import posthog from 'posthog-js'
 
-import { AvailableFeature, OrganizationBasicType, ProductKey, UserTheme, UserType } from '~/types'
+import { sidePanelStateLogic } from '~/layout/navigation-3000/sidepanel/sidePanelStateLogic'
+import { AvailableFeature, OrganizationBasicType, ProductKey, UserRole, UserTheme, UserType } from '~/types'
 
 import { urls } from './urls'
 import type { userLogicType } from './userLogicType'
@@ -27,7 +27,7 @@ export const userLogic = kea<userLogicType>([
         updateUser: (user: Partial<UserType>, successCallback?: () => void) => ({ user, successCallback }),
         setUserScenePersonalisation: (scene: DashboardCompatibleScenes, dashboard: number) => ({ scene, dashboard }),
         updateHasSeenProductIntroFor: (productKey: ProductKey, value: boolean) => ({ productKey, value }),
-        switchTeam: (teamId: string | number) => ({ teamId }),
+        switchTeam: (teamId: string | number, destination?: string) => ({ teamId, destination }),
     })),
     forms(({ actions }) => ({
         userDetails: {
@@ -55,7 +55,7 @@ export const userLogic = kea<userLogicType>([
             {
                 loadUser: async () => {
                     try {
-                        return await api.get('api/users/@me/')
+                        return await api.get<UserType>('api/users/@me/')
                     } catch (error: any) {
                         console.error(error)
                         actions.loadUserFailure(error.message)
@@ -67,12 +67,13 @@ export const userLogic = kea<userLogicType>([
                         throw new Error('Current user has not been loaded yet, so it cannot be updated!')
                     }
                     try {
-                        const response = await api.update('api/users/@me/', user)
+                        const response = await api.update<UserType>('api/users/@me/', user)
                         successCallback && successCallback()
                         return response
                     } catch (error: any) {
                         console.error(error)
                         actions.updateUserFailure(error.message)
+                        return values.user
                     }
                 },
                 setUserScenePersonalisation: async ({ scene, dashboard }) => {
@@ -80,13 +81,14 @@ export const userLogic = kea<userLogicType>([
                         throw new Error('Current user has not been loaded yet, so it cannot be updated!')
                     }
                     try {
-                        return await api.create('api/users/@me/scene_personalisation', {
+                        return await api.create<UserType>('api/users/@me/scene_personalisation', {
                             scene,
                             dashboard,
                         })
                     } catch (error: any) {
                         console.error(error)
                         actions.updateUserFailure(error.message)
+                        return values.user
                     }
                 },
             },
@@ -179,6 +181,9 @@ export const userLogic = kea<userLogicType>([
             }
             await breakpoint(10)
             await api.update('api/users/@me/', { set_current_organization: organizationId })
+
+            sidePanelStateLogic.findMounted()?.actions.closeSidePanel()
+
             window.location.href = destination || '/'
         },
         updateHasSeenProductIntroFor: async ({ productKey, value }, breakpoint) => {
@@ -194,8 +199,10 @@ export const userLogic = kea<userLogicType>([
                     actions.loadUser()
                 })
         },
-        switchTeam: ({ teamId }) => {
-            window.location.href = urls.project(teamId)
+        switchTeam: ({ teamId, destination }) => {
+            sidePanelStateLogic.findMounted()?.actions.closeSidePanel()
+
+            window.location.href = destination || urls.project(teamId)
         },
     })),
     selectors({
@@ -248,6 +255,22 @@ export const userLogic = kea<userLogicType>([
                 return user?.theme_mode || 'light'
             },
         ],
+
+        isUserNonTechnical: [
+            (s) => [s.user],
+            (user): boolean => {
+                const nonTechnicalRoles = [
+                    UserRole.Founder,
+                    UserRole.Leadership,
+                    UserRole.Marketing,
+                    UserRole.Sales,
+                    UserRole.Other,
+                ]
+                return user?.role_at_organization
+                    ? nonTechnicalRoles.includes(user.role_at_organization as UserRole)
+                    : false
+            },
+        ],
     }),
     afterMount(({ actions }) => {
         const preloadedUser = getAppContext()?.current_user
@@ -259,14 +282,4 @@ export const userLogic = kea<userLogicType>([
             actions.loadUser()
         }
     }),
-    urlToAction(({ values }) => ({
-        '/year_in_posthog/2023': () => {
-            if (window.POSTHOG_APP_CONTEXT?.year_in_hog_url) {
-                window.location.href = `${window.location.origin}${window.POSTHOG_APP_CONTEXT.year_in_hog_url}`
-            }
-            if (values.user?.uuid) {
-                window.location.href = `${window.location.origin}/year_in_posthog/2023/${values.user?.uuid}`
-            }
-        },
-    })),
 ])

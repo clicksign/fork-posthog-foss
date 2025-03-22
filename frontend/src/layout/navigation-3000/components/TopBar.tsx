@@ -1,11 +1,14 @@
 import './TopBar.scss'
 
-import { IconChevronDown } from '@posthog/icons'
+import { IconChevronDown, IconX } from '@posthog/icons'
 import { LemonButton, LemonSkeleton, LemonTag } from '@posthog/lemon-ui'
 import clsx from 'clsx'
 import { useActions, useValues } from 'kea'
 import { router } from 'kea-router'
 import { EditableField } from 'lib/components/EditableField/EditableField'
+import { FlaggedFeature } from 'lib/components/FlaggedFeature'
+import { MetalyticsSummary } from 'lib/components/Metalytics/MetalyticsSummary'
+import { FEATURE_FLAGS } from 'lib/constants'
 import { IconMenu } from 'lib/lemon-ui/icons'
 import { Link } from 'lib/lemon-ui/Link'
 import { Popover } from 'lib/lemon-ui/Popover/Popover'
@@ -13,6 +16,7 @@ import React, { useLayoutEffect, useState } from 'react'
 
 import { breadcrumbsLogic } from '~/layout/navigation/Breadcrumbs/breadcrumbsLogic'
 import { navigationLogic } from '~/layout/navigation/navigationLogic'
+import { panelLayoutLogic } from '~/layout/panel-layout/panelLayoutLogic'
 import { Breadcrumb as IBreadcrumb } from '~/types'
 
 import { navigation3000Logic } from '../navigationLogic'
@@ -25,7 +29,8 @@ export function TopBar(): JSX.Element | null {
     const { showNavOnMobile } = useActions(navigation3000Logic)
     const { breadcrumbs, renameState } = useValues(breadcrumbsLogic)
     const { setActionsContainer } = useActions(breadcrumbsLogic)
-
+    const { showLayoutNavBar } = useActions(panelLayoutLogic)
+    const { isLayoutNavbarVisibleForMobile } = useValues(panelLayoutLogic)
     const [compactionRate, setCompactionRate] = useState(0)
 
     // Always show in full on mobile, as there we are very constrained in width, but not so much height
@@ -76,12 +81,24 @@ export function TopBar(): JSX.Element | null {
         >
             <div className="TopBar3000__content">
                 {mobileLayout && (
-                    <LemonButton
-                        size="small"
-                        onClick={() => showNavOnMobile()}
-                        icon={<IconMenu />}
-                        className="TopBar3000__hamburger"
-                    />
+                    <FlaggedFeature
+                        flag={FEATURE_FLAGS.TREE_VIEW}
+                        fallback={
+                            <LemonButton
+                                size="small"
+                                onClick={() => showNavOnMobile()}
+                                icon={<IconMenu />}
+                                className="TopBar3000__hamburger"
+                            />
+                        }
+                    >
+                        <LemonButton
+                            size="small"
+                            onClick={() => showLayoutNavBar(!isLayoutNavbarVisibleForMobile)}
+                            icon={isLayoutNavbarVisibleForMobile ? <IconX /> : <IconMenu />}
+                            className="TopBar3000__hamburger"
+                        />
+                    </FlaggedFeature>
                 )}
                 <div className="TopBar3000__breadcrumbs">
                     {breadcrumbs.length > 1 && (
@@ -101,7 +118,12 @@ export function TopBar(): JSX.Element | null {
                     )}
                     <Here breadcrumb={breadcrumbs[breadcrumbs.length - 1]} isOnboarding={isOnboarding} />
                 </div>
-                <div className="TopBar3000__actions" ref={setActionsContainer} />
+                <FlaggedFeature flag="metalytics">
+                    <div className="shrink-1">
+                        <MetalyticsSummary />
+                    </div>
+                </FlaggedFeature>
+                <div className="TopBar3000__actions border-danger" ref={setActionsContainer} />
             </div>
         </div>
     ) : null

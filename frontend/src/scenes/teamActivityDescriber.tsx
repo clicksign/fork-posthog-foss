@@ -10,10 +10,17 @@ import {
 import { SentenceList } from 'lib/components/ActivityLog/SentenceList'
 import PropertyFiltersDisplay from 'lib/components/PropertyFilters/components/PropertyFiltersDisplay'
 import { Link } from 'lib/lemon-ui/Link'
-import { isObject, pluralize } from 'lib/utils'
+import { isNotNil, isObject, pluralize } from 'lib/utils'
 import { urls } from 'scenes/urls'
 
+import {
+    CurrencyCode,
+    RevenueTrackingDataWarehouseTable,
+    RevenueTrackingEventItem,
+} from '~/queries/schema/schema-general'
 import { ActivityScope, TeamSurveyConfigType, TeamType } from '~/types'
+
+import { ThemeName } from './dataThemeLogic'
 
 const teamActionsMapping: Record<
     keyof TeamType,
@@ -86,8 +93,8 @@ const teamActionsMapping: Record<
         }
     },
     recording_domains(change: ActivityChange | undefined): ChangeMapping | null {
-        const before: string[] | null = Array.isArray(change?.before) ? change!.before : null
-        const after: string[] | null = Array.isArray(change?.after) ? change!.after : null
+        const before: string[] | null = Array.isArray(change?.before) ? change?.before.map(String) ?? null : null
+        const after: string[] | null = Array.isArray(change?.after) ? change?.after.map(String) ?? null : null
         if (after === null && before === null) {
             return null
         }
@@ -139,6 +146,47 @@ const teamActionsMapping: Record<
                 </>,
             ],
         }
+    },
+    session_recording_masking_config(change: ActivityChange | undefined): ChangeMapping | null {
+        const maskAllInputsBefore = isObject(change?.before) ? change?.before.maskAllInputs : !!change?.before
+        const maskAllInputsAfter = isObject(change?.after) ? change?.after.maskAllInputs : !!change?.after
+        const maskAllInputsChanged = maskAllInputsBefore !== maskAllInputsAfter
+
+        const blockSelectorBefore = isObject(change?.before) ? change?.before.blockSelector : undefined
+        const blockSelectorAfter = isObject(change?.after) ? change?.after.blockSelector : undefined
+        const blockSelectorChanged = blockSelectorBefore !== blockSelectorAfter
+
+        const maskTextSelectorBefore = isObject(change?.before) ? change?.before.maskTextSelector : !!change?.before
+        const maskTextSelectorAfter = isObject(change?.after) ? change?.after.maskTextSelector : !!change?.after
+        const maskTextSelectorChanged = maskTextSelectorBefore !== maskTextSelectorAfter
+
+        const descriptions = []
+        if (maskAllInputsChanged) {
+            descriptions.push(<>{maskAllInputsAfter ? 'enabled' : 'disabled'} masking all inputs in session replay</>)
+        }
+
+        if (maskTextSelectorChanged) {
+            descriptions.push(
+                <>
+                    {change?.action === 'created' ? 'set' : 'changed'} masking text selector to {maskTextSelectorAfter}{' '}
+                    in session replay
+                </>
+            )
+        }
+
+        if (blockSelectorChanged) {
+            descriptions.push(
+                <>
+                    {change?.action === 'created' ? 'set' : 'changed'} blocking selector to "{blockSelectorAfter}"
+                </>
+            )
+        }
+
+        return descriptions.length
+            ? {
+                  description: descriptions,
+              }
+            : null
     },
     session_recording_network_payload_capture_config(change: ActivityChange | undefined): ChangeMapping | null {
         const payloadBefore = isObject(change?.before) ? change?.before.recordBody : !!change?.before
@@ -303,6 +351,176 @@ const teamActionsMapping: Record<
             ],
         }
     },
+    extra_settings: (change: ActivityChange | undefined): ChangeMapping | null => {
+        const after = change?.after
+        if (typeof after !== 'object') {
+            return null
+        }
+        const descriptions = []
+        for (const key in after) {
+            if (key === 'poe_v2_enabled') {
+                descriptions.push(
+                    <>{after[key as keyof typeof after] ? 'enabled' : 'disabled'} Person on Events (v2)</>
+                )
+            }
+        }
+        return { description: descriptions }
+    },
+    modifiers: (change: ActivityChange | undefined): ChangeMapping | null => {
+        const after = change?.after
+        if (typeof after !== 'object') {
+            return null
+        }
+        const descriptions = []
+        for (const key in after) {
+            descriptions.push(
+                <>
+                    set <em>{key}</em> to "{String(after[key as keyof typeof after])}"
+                </>
+            )
+        }
+        return { description: descriptions }
+    },
+    default_data_theme: (change): ChangeMapping | null => {
+        return {
+            description: [
+                <>
+                    changed the default color theme{' '}
+                    {change?.before && (
+                        <>
+                            from <ThemeName id={change.before as number} />{' '}
+                        </>
+                    )}
+                    to{' '}
+                    <em>
+                        <ThemeName id={change?.after as number} />
+                    </em>
+                </>,
+            ],
+        }
+    },
+    human_friendly_comparison_periods: (change): ChangeMapping | null => {
+        if (!change) {
+            return null
+        }
+
+        return {
+            description: [
+                <>
+                    <strong>{change?.after ? 'enabled' : 'disabled'}</strong> human friendly comparison periods
+                </>,
+            ],
+        }
+    },
+    revenue_tracking_config: (change): ChangeMapping | null => {
+        if (!change) {
+            return null
+        }
+
+        const beforeCurrency =
+            typeof change.before === 'object' && change.before && 'baseCurrency' in change.before
+                ? change.before.baseCurrency || CurrencyCode.USD
+                : null
+        const afterCurrency =
+            typeof change.after === 'object' && change.after && 'baseCurrency' in change.after
+                ? change.after.baseCurrency || CurrencyCode.USD
+                : null
+
+        const beforeEvents: RevenueTrackingEventItem[] =
+            typeof change.before === 'object' && change.before && 'events' in change.before ? change.before.events : []
+        const afterEvents: RevenueTrackingEventItem[] =
+            typeof change.after === 'object' && change.after && 'events' in change.after ? change.after.events : []
+
+        const beforeEventNames = beforeEvents?.map((event) => event?.eventName)
+        const afterEventNames = afterEvents?.map((event) => event?.eventName)
+        const addedEvents = afterEventNames?.filter((event) => !beforeEventNames?.includes(event))
+        const removedEvents = beforeEventNames?.filter((event) => !afterEventNames?.includes(event))
+        const modifiedEvents = afterEventNames?.filter((event) => beforeEventNames?.includes(event))
+
+        const beforedataWarehouseTables: RevenueTrackingDataWarehouseTable[] =
+            typeof change.before === 'object' && change.before && 'dataWarehouseTables' in change.before
+                ? change.before.dataWarehouseTables
+                : []
+        const afterdataWarehouseTables: RevenueTrackingDataWarehouseTable[] =
+            typeof change.after === 'object' && change.after && 'dataWarehouseTables' in change.after
+                ? change.after.dataWarehouseTables
+                : []
+
+        const beforeExternalDataSchemaNames = beforedataWarehouseTables?.map((schema) => schema?.tableName)
+        const afterExternalDataSchemaNames = afterdataWarehouseTables?.map((schema) => schema?.tableName)
+        const addeddataWarehouseTables = afterExternalDataSchemaNames?.filter(
+            (schema) => !beforeExternalDataSchemaNames?.includes(schema)
+        )
+        const removeddataWarehouseTables = beforeExternalDataSchemaNames?.filter(
+            (schema) => !afterExternalDataSchemaNames?.includes(schema)
+        )
+        const modifieddataWarehouseTables = afterExternalDataSchemaNames?.filter((schema) =>
+            beforeExternalDataSchemaNames?.includes(schema)
+        )
+
+        const changes = [
+            addedEvents?.length
+                ? `added ${addedEvents.length} ${pluralize(
+                      addedEvents.length,
+                      'event',
+                      'events',
+                      true
+                  )} (${addedEvents.join(', ')})`
+                : null,
+            removedEvents?.length
+                ? `removed ${removedEvents.length} ${pluralize(
+                      removedEvents.length,
+                      'event',
+                      'events',
+                      true
+                  )} (${removedEvents.join(', ')})`
+                : null,
+            modifiedEvents?.length
+                ? `modified ${modifiedEvents.length} ${pluralize(
+                      modifiedEvents.length,
+                      'event',
+                      'events',
+                      true
+                  )} (${modifiedEvents.join(', ')})`
+                : null,
+            addeddataWarehouseTables?.length
+                ? `added ${addeddataWarehouseTables.length} ${pluralize(
+                      addeddataWarehouseTables.length,
+                      'data warehouse table',
+                      'data warehouse tables',
+                      true
+                  )} (${addeddataWarehouseTables.join(', ')})`
+                : null,
+            removeddataWarehouseTables?.length
+                ? `removed ${removeddataWarehouseTables.length} ${pluralize(
+                      removeddataWarehouseTables.length,
+                      'data warehouse table',
+                      'data warehouse tables',
+                      true
+                  )} (${removeddataWarehouseTables.join(', ')})`
+                : null,
+            modifieddataWarehouseTables?.length
+                ? `modified ${modifieddataWarehouseTables.length} ${pluralize(
+                      modifieddataWarehouseTables.length,
+                      'data warehouse table',
+                      'data warehouse tables',
+                      true
+                  )} (${modifieddataWarehouseTables.join(', ')})`
+                : null,
+            beforeCurrency && afterCurrency && beforeCurrency !== afterCurrency
+                ? `changed base currency from ${beforeCurrency} to ${afterCurrency}`
+                : null,
+        ].filter(isNotNil)
+
+        if (!changes.length) {
+            return null
+        }
+
+        return {
+            description: [<>Updated revenue tracking config: {changes.join(', ')}</>],
+        }
+    },
+
     // TODO if I had to test and describe every single one of this I'd never release this
     // we can add descriptions here as the need arises
     access_control: () => null,
@@ -325,45 +543,23 @@ const teamActionsMapping: Record<
     slack_incoming_webhook: () => null,
     timezone: () => null,
     surveys_opt_in: () => null,
+    flags_persistence_default: () => null,
     week_start_day: () => null,
-    extra_settings: (change: ActivityChange | undefined): ChangeMapping | null => {
-        const after = change?.after
-        if (typeof after !== 'object') {
-            return null
-        }
-        const descriptions = []
-        for (const key in after) {
-            if (key === 'poe_v2_enabled') {
-                descriptions.push(<>{after[key] ? 'enabled' : 'disabled'} Person on Events (v2)</>)
-            }
-        }
-        return { description: descriptions }
-    },
-    modifiers: (change: ActivityChange | undefined): ChangeMapping | null => {
-        const after = change?.after
-        if (typeof after !== 'object') {
-            return null
-        }
-        const descriptions = []
-        for (const key in after) {
-            descriptions.push(
-                <>
-                    set <em>{key}</em> to "{String(after[key])}"
-                </>
-            )
-        }
-        return { description: descriptions }
-    },
     default_modifiers: () => null,
     has_completed_onboarding_for: () => null,
+    onboarding_tasks: () => null,
+
     // should never come from the backend
     created_at: () => null,
     api_token: () => null,
     id: () => null,
     updated_at: () => null,
     uuid: () => null,
+    user_access_level: () => null,
     live_events_token: () => null,
     product_intents: () => null,
+    cookieless_server_hash_mode: () => null,
+    access_control_version: () => null,
 }
 
 function nameAndLink(logItem?: ActivityLogItem): JSX.Element {
@@ -387,11 +583,11 @@ export function teamActivityDescriber(logItem: ActivityLogItem, asNotification?:
         let changeSuffix: Description = <>on {nameAndLink(logItem)}</>
 
         for (const change of logItem.detail.changes || []) {
-            if (!change?.field || !teamActionsMapping[change.field]) {
+            if (!change?.field || !(change.field in teamActionsMapping)) {
                 continue //  not all notebook fields are describable
             }
 
-            const actionHandler = teamActionsMapping[change.field]
+            const actionHandler = teamActionsMapping[change.field as keyof TeamType]
             const processedChange = actionHandler(change, logItem)
             if (processedChange === null) {
                 continue // // unexpected log from backend is indescribable

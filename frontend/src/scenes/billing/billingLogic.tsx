@@ -4,6 +4,7 @@ import { FieldNamePath, forms } from 'kea-forms'
 import { loaders } from 'kea-loaders'
 import { router, urlToAction } from 'kea-router'
 import api, { getJSONOrNull } from 'lib/api'
+import { FEATURE_FLAGS } from 'lib/constants'
 import { dayjs } from 'lib/dayjs'
 import { LemonBannerAction } from 'lib/lemon-ui/LemonBanner/LemonBanner'
 import { lemonBannerLogic } from 'lib/lemon-ui/LemonBanner/lemonBannerLogic'
@@ -12,6 +13,7 @@ import { featureFlagLogic } from 'lib/logic/featureFlagLogic'
 import { pluralize } from 'lib/utils'
 import { eventUsageLogic } from 'lib/utils/eventUsageLogic'
 import posthog from 'posthog-js'
+import { organizationLogic } from 'scenes/organizationLogic'
 import { preflightLogic } from 'scenes/PreflightCheck/preflightLogic'
 import { userLogic } from 'scenes/userLogic'
 
@@ -104,6 +106,8 @@ export const billingLogic = kea<billingLogicType>([
         actions: [
             userLogic,
             ['loadUser'],
+            organizationLogic,
+            ['loadCurrentOrganization'],
             eventUsageLogic,
             ['reportProductUnsubscribed'],
             lemonBannerLogic({ dismissKey: 'usage-limit-exceeded' }),
@@ -211,7 +215,13 @@ export const billingLogic = kea<billingLogicType>([
             null as BillingType | null,
             {
                 loadBilling: async () => {
-                    const response = await api.get('api/billing')
+                    // Note: this is a temporary flag to skip forecasting in the billing page
+                    // for customers running into performance issues until we have a more permanent fix
+                    // of splitting the billing and forecasting data.
+                    const skipForecasting = values.featureFlags[FEATURE_FLAGS.BILLING_SKIP_FORECASTING]
+                    const response = await api.get(
+                        'api/billing' + (skipForecasting ? '?include_forecasting=false' : '')
+                    )
 
                     return parseBillingResponse(response)
                 },
@@ -220,6 +230,7 @@ export const billingLogic = kea<billingLogicType>([
                     try {
                         const response = await api.update('api/billing', { custom_limits_usd: limits })
                         lemonToast.success('Billing limits updated')
+                        actions.loadBilling()
                         return parseBillingResponse(response)
                     } catch (error: any) {
                         lemonToast.error(
@@ -229,7 +240,7 @@ export const billingLogic = kea<billingLogicType>([
                     }
                 },
 
-                deactivateProduct: async (key: string) => {
+                deactivateProduct: async (key: string, breakpoint) => {
                     // clear upgrade params from URL
                     // Note(@zach): This is not working properly. We need to look into this.
                     const currentURL = new URL(window.location.href)
@@ -246,6 +257,12 @@ export const billingLogic = kea<billingLogicType>([
                             "You have been unsubscribed. We're sad to see you go. May the hedgehogs be ever in your favor."
                         )
                         actions.reportProductUnsubscribed(key)
+
+                        // Reload billing, user, and organization to get the updated available features
+                        actions.loadBilling()
+                        await breakpoint(2000) // Wait enough time for the organization to be updated
+                        actions.loadUser()
+                        actions.loadCurrentOrganization()
 
                         return parseBillingResponse(jsonRes)
                     } catch (error: any) {
@@ -424,6 +441,12 @@ export const billingLogic = kea<billingLogicType>([
             },
         ],
         creditDiscount: [(s) => [s.computedDiscount], (computedDiscount) => computedDiscount || 0],
+        isManagedAccount: [
+            (s) => [s.billing],
+            (billing: BillingType): boolean => {
+                return !!(billing?.account_owner?.name || billing?.account_owner?.email)
+            },
+        ],
     }),
     forms(({ actions, values }) => ({
         activateLicense: {
@@ -544,20 +567,27 @@ export const billingLogic = kea<billingLogicType>([
                 posthog.capture('credits cta hero dismissed')
             }
         },
-        loadBillingSuccess: () => {
-            if (
-                router.values.location.pathname.includes('/organization/billing') &&
-                router.values.searchParams['success']
-            ) {
-                // if the activation is successful, we reload the user to get the updated billing info on the organization
-                actions.loadUser()
-                router.actions.replace('/organization/billing')
-            }
+        loadBillingSuccess: async (_, breakpoint) => {
             actions.registerInstrumentationProps()
-
             actions.determineBillingAlert()
-
             actions.loadCreditOverview()
+
+            // If the activation is successful, we reload the user/organization to get the updated available features
+            // activation can be triggered from the billing page or onboarding
+            if (
+                (router.values.location.pathname.includes('/organization/billing') ||
+                    router.values.location.pathname.includes('/onboarding')) &&
+                (router.values.searchParams['success'] || router.values.searchParams['upgraded'])
+            ) {
+                // Wait enough time for the organization to be updated
+                await breakpoint(1000)
+                actions.loadUser()
+                actions.loadCurrentOrganization()
+                // Clear the params from the billing page so we don't trigger the activation again
+                if (router.values.location.pathname.includes('/organization/billing')) {
+                    router.actions.replace('/organization/billing')
+                }
+            }
         },
         determineBillingAlert: () => {
             if (values.productSpecificAlert) {
@@ -610,6 +640,8 @@ export const billingLogic = kea<billingLogicType>([
                         or ${
                             productOverLimit.name === 'Data warehouse'
                                 ? 'data will not be synced'
+                                : productOverLimit.name === 'Feature flags & Experiments'
+                                ? 'feature flags will not evaluate'
                                 : 'data loss may occur'
                         }.`,
                     dismissKey: 'usage-limit-exceeded',

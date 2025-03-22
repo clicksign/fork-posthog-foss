@@ -1,5 +1,5 @@
 import { getQueryFeatures, QueryFeature } from '~/queries/nodes/DataTable/queryFeatures'
-import { DataNode, DataTableNode, EventsQuery, HogQLExpression, NodeKind } from '~/queries/schema'
+import { DataNode, DataTableNode, EventsQuery, HogQLExpression, NodeKind } from '~/queries/schema/schema-general'
 
 export const defaultDataTableEventColumns: HogQLExpression[] = [
     '*',
@@ -12,6 +12,8 @@ export const defaultDataTableEventColumns: HogQLExpression[] = [
 
 export const defaultDataTablePersonColumns: HogQLExpression[] = ['person', 'id', 'created_at', 'person.$delete']
 
+export const defaultDataTableGroupColumns: HogQLExpression[] = ['group_name', 'key', 'created_at']
+
 export function defaultDataTableColumns(kind: NodeKind): HogQLExpression[] {
     return kind === NodeKind.PersonsNode || kind === NodeKind.ActorsQuery
         ? defaultDataTablePersonColumns
@@ -19,6 +21,8 @@ export function defaultDataTableColumns(kind: NodeKind): HogQLExpression[] {
         ? defaultDataTableEventColumns
         : kind === NodeKind.EventsNode
         ? defaultDataTableEventColumns.filter((c) => c !== '*')
+        : kind === NodeKind.GroupsQuery
+        ? defaultDataTableGroupColumns
         : []
 }
 

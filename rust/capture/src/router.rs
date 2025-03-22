@@ -13,7 +13,10 @@ use tower_http::cors::{AllowHeaders, AllowOrigin, CorsLayer};
 use tower_http::trace::TraceLayer;
 
 use crate::test_endpoint;
-use crate::{limiters::redis::RedisLimiter, redis::Client, sinks, time::TimeSource, v0_endpoint};
+use crate::{sinks, time::TimeSource, v0_endpoint};
+use common_redis::Client;
+use limiters::redis::RedisLimiter;
+use limiters::token_dropper::TokenDropper;
 
 use crate::config::CaptureMode;
 use crate::prometheus::{setup_metrics_recorder, track_metrics};
@@ -28,6 +31,7 @@ pub struct State {
     pub timesource: Arc<dyn TimeSource + Send + Sync>,
     pub redis: Arc<dyn Client + Send + Sync>,
     pub billing_limiter: RedisLimiter,
+    pub token_dropper: Arc<TokenDropper>,
     pub event_size_limit: usize,
 }
 
@@ -46,6 +50,7 @@ pub fn router<
     sink: S,
     redis: Arc<R>,
     billing_limiter: RedisLimiter,
+    token_dropper: TokenDropper,
     metrics: bool,
     capture_mode: CaptureMode,
     concurrency_limit: Option<usize>,
@@ -57,6 +62,7 @@ pub fn router<
         redis,
         billing_limiter,
         event_size_limit,
+        token_dropper: Arc::new(token_dropper),
     };
 
     // Very permissive CORS policy, as old SDK versions

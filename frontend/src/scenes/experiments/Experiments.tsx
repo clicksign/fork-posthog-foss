@@ -1,7 +1,7 @@
 import { LemonDialog, LemonInput, LemonSelect } from '@posthog/lemon-ui'
 import { useActions, useValues } from 'kea'
 import { router } from 'kea-router'
-import { DetectiveHog, ExperimentsHog } from 'lib/components/hedgehogs'
+import { ExperimentsHog } from 'lib/components/hedgehogs'
 import { MemberSelect } from 'lib/components/MemberSelect'
 import { PageHeader } from 'lib/components/PageHeader'
 import { ProductIntroduction } from 'lib/components/ProductIntroduction/ProductIntroduction'
@@ -15,8 +15,8 @@ import { atColumn, createdAtColumn, createdByColumn } from 'lib/lemon-ui/LemonTa
 import { LemonTableLink } from 'lib/lemon-ui/LemonTable/LemonTableLink'
 import { LemonTabs } from 'lib/lemon-ui/LemonTabs'
 import { Link } from 'lib/lemon-ui/Link'
+import { featureFlagLogic } from 'lib/logic/featureFlagLogic'
 import stringWithWBR from 'lib/utils/stringWithWBR'
-import posthog from 'posthog-js'
 import { SceneExport } from 'scenes/sceneTypes'
 import { urls } from 'scenes/urls'
 
@@ -25,52 +25,22 @@ import { Experiment, ExperimentsTabs, ProductKey, ProgressStatus } from '~/types
 import { experimentsLogic, getExperimentStatus } from './experimentsLogic'
 import { StatusTag } from './ExperimentView/components'
 import { Holdouts } from './Holdouts'
+import { SharedMetrics } from './SharedMetrics/SharedMetrics'
 
 export const scene: SceneExport = {
     component: Experiments,
     logic: experimentsLogic,
 }
 
-export const ExperimentsDisabledBanner = (): JSX.Element => {
-    const payload = posthog.getFeatureFlagPayload(FEATURE_FLAGS.EXPERIMENTS_MIGRATION_DISABLE_UI)
-
-    return (
-        <div className="border-2 border-dashed border-border w-full p-8 justify-center rounded mt-2 mb-4">
-            <div className="flex items-center gap-8 w-full justify-center flex-wrap">
-                <div>
-                    <div className="w-50 mx-auto mb-4">
-                        <DetectiveHog className="w-full h-full" />
-                    </div>
-                </div>
-                <div className="flex-shrink max-w-140">
-                    <h2>We'll be right back!</h2>
-                    <p>
-                        We’re upgrading experiments to a new schema to make them faster, more reliable, and ready for
-                        future improvements.
-                    </p>
-                    <p>
-                        We expect to be done by <span className="font-semibold">{payload}</span>. Thanks for your
-                        patience!
-                    </p>
-                </div>
-            </div>
-        </div>
-    )
-}
-
 export function Experiments(): JSX.Element {
-    const {
-        filteredExperiments,
-        experimentsLoading,
-        tab,
-        searchTerm,
-        shouldShowEmptyState,
-        searchStatus,
-        userFilter,
-        featureFlags,
-    } = useValues(experimentsLogic)
+    const { filteredExperiments, experimentsLoading, tab, searchTerm, shouldShowEmptyState, searchStatus, userFilter } =
+        useValues(experimentsLogic)
     const { setExperimentsTab, deleteExperiment, archiveExperiment, setSearchStatus, setSearchTerm, setUserFilter } =
         useActions(experimentsLogic)
+
+    const { featureFlags } = useValues(featureFlagLogic)
+
+    const flagResult = featureFlags[FEATURE_FLAGS.EXPERIMENTS_NEW_QUERY_RUNNER_AA_TEST]
 
     const EXPERIMENTS_PRODUCT_DESCRIPTION =
         'Experiments help you test changes to your product to see which changes will lead to optimal results. Automatic statistical calculations let you see if the results are valid or if they are likely just a chance occurrence.'
@@ -155,7 +125,7 @@ export function Experiments(): JSX.Element {
                                                 LemonDialog.open({
                                                     title: 'Archive this experiment?',
                                                     content: (
-                                                        <div className="text-sm text-muted">
+                                                        <div className="text-sm text-secondary">
                                                             This action will move the experiment to the archived tab. It
                                                             can be restored at any time.
                                                         </div>
@@ -186,7 +156,7 @@ export function Experiments(): JSX.Element {
                                         LemonDialog.open({
                                             title: 'Delete this experiment?',
                                             content: (
-                                                <div className="text-sm text-muted">
+                                                <div className="text-sm text-secondary">
                                                     This action cannot be undone. All experiment data will be
                                                     permanently removed.
                                                 </div>
@@ -217,9 +187,7 @@ export function Experiments(): JSX.Element {
         },
     ]
 
-    return featureFlags[FEATURE_FLAGS.EXPERIMENTS_MIGRATION_DISABLE_UI] ? (
-        <ExperimentsDisabledBanner />
-    ) : (
+    return (
         <div>
             <PageHeader
                 buttons={
@@ -242,6 +210,10 @@ export function Experiments(): JSX.Element {
                 }
                 tabbedPage={true}
             />
+            {/* TODO: Remove this after AA test is over. Just a hidden element. */}
+            <span className="hidden" data-attr="aa-test-flag-result">
+                AA test flag result: {String(flagResult)}
+            </span>
             <LemonTabs
                 activeKey={tab}
                 onChange={(newKey) => setExperimentsTab(newKey)}
@@ -249,14 +221,15 @@ export function Experiments(): JSX.Element {
                     { key: ExperimentsTabs.All, label: 'All experiments' },
                     { key: ExperimentsTabs.Yours, label: 'Your experiments' },
                     { key: ExperimentsTabs.Archived, label: 'Archived experiments' },
-                    ...(featureFlags[FEATURE_FLAGS.EXPERIMENTS_HOLDOUTS]
-                        ? [{ key: ExperimentsTabs.Holdouts, label: 'Holdout groups' }]
-                        : []),
+                    { key: ExperimentsTabs.Holdouts, label: 'Holdout groups' },
+                    { key: ExperimentsTabs.SharedMetrics, label: 'Shared metrics' },
                 ]}
             />
 
-            {featureFlags[FEATURE_FLAGS.EXPERIMENTS_HOLDOUTS] && tab === ExperimentsTabs.Holdouts ? (
+            {tab === ExperimentsTabs.Holdouts ? (
                 <Holdouts />
+            ) : tab === ExperimentsTabs.SharedMetrics ? (
+                <SharedMetrics />
             ) : (
                 <>
                     {tab === ExperimentsTabs.Archived ? (

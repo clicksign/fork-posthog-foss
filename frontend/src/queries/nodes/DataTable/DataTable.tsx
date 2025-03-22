@@ -47,22 +47,29 @@ import {
     DataTableNode,
     EventsNode,
     EventsQuery,
+    GroupsQuery,
     HogQLQuery,
     PersonsNode,
     SessionAttributionExplorerQuery,
-} from '~/queries/schema'
+    TracesQuery,
+} from '~/queries/schema/schema-general'
 import { QueryContext } from '~/queries/types'
 import {
     isActorsQuery,
     isEventsQuery,
+    isGroupsQuery,
     isHogQlAggregation,
     isHogQLQuery,
     isInsightActorsQuery,
+    isRevenueExampleEventsQuery,
     taxonomicEventFilterToHogQL,
+    taxonomicGroupFilterToHogQL,
     taxonomicPersonFilterToHogQL,
 } from '~/queries/utils'
 import { EventType, InsightLogicProps } from '~/types'
 
+import { GroupPropertyFilters } from '../GroupsQuery/GroupPropertyFilters'
+import { GroupsSearch } from '../GroupsQuery/GroupsSearch'
 import { DataTableOpenEditor } from './DataTableOpenEditor'
 
 interface DataTableProps {
@@ -77,6 +84,10 @@ interface DataTableProps {
     // Override the data logic node key if needed
     dataNodeLogicKey?: string
     readOnly?: boolean
+    /*
+     Set a data-attr on the LemonTable component
+    */
+    dataAttr?: string
 }
 
 const eventGroupTypes = [
@@ -96,6 +107,7 @@ export function DataTable({
     context,
     cachedResults,
     readOnly,
+    dataAttr,
 }: DataTableProps): JSX.Element {
     const [uniqueNodeKey] = useState(() => uniqueNode++)
     const [dataKey] = useState(() => `DataNode.${uniqueKey || uniqueNodeKey}`)
@@ -109,7 +121,7 @@ export function DataTable({
         key: vizKey,
         cachedResults: cachedResults,
         dataNodeCollectionId: context?.insightProps?.dataNodeCollectionId || dataKey,
-        alwaysRefresh: context?.alwaysRefresh,
+        refresh: context?.refresh,
     }
     const builtDataNodeLogic = dataNodeLogic(dataNodeLogicProps)
 
@@ -283,6 +295,8 @@ export function DataTable({
                             onChange={(v, g) => {
                                 const hogQl = isActorsQuery(query.source)
                                     ? taxonomicPersonFilterToHogQL(g, v)
+                                    : isGroupsQuery(query.source)
+                                    ? taxonomicGroupFilterToHogQL(g, v)
                                     : taxonomicEventFilterToHogQL(g, v)
                                 if (setQuery && hogQl && sourceFeatures.has(QueryFeature.selectAndOrderByColumns)) {
                                     const isAggregation = isHogQlAggregation(hogQl)
@@ -312,6 +326,8 @@ export function DataTable({
                             onChange={(v, g) => {
                                 const hogQl = isActorsQuery(query.source)
                                     ? taxonomicPersonFilterToHogQL(g, v)
+                                    : isGroupsQuery(query.source)
+                                    ? taxonomicGroupFilterToHogQL(g, v)
                                     : taxonomicEventFilterToHogQL(g, v)
                                 if (setQuery && hogQl && sourceFeatures.has(QueryFeature.selectAndOrderByColumns)) {
                                     const isAggregation = isHogQlAggregation(hogQl)
@@ -388,8 +404,17 @@ export function DataTable({
     ].filter((column) => !query.hiddenColumns?.includes(column.dataIndex) && column.dataIndex !== '*')
 
     const setQuerySource = useCallback(
-        (source: EventsNode | EventsQuery | PersonsNode | ActorsQuery | HogQLQuery | SessionAttributionExplorerQuery) =>
-            setQuery?.({ ...query, source }),
+        (
+            source:
+                | EventsNode
+                | EventsQuery
+                | PersonsNode
+                | ActorsQuery
+                | GroupsQuery
+                | HogQLQuery
+                | SessionAttributionExplorerQuery
+                | TracesQuery
+        ) => setQuery?.({ ...query, source }),
         [setQuery, query]
     )
 
@@ -410,7 +435,7 @@ export function DataTable({
         showDateRange && sourceFeatures.has(QueryFeature.dateRangePicker) ? (
             <DateRange
                 key="date-range"
-                query={query.source as HogQLQuery | EventsQuery | SessionAttributionExplorerQuery}
+                query={query.source as HogQLQuery | EventsQuery | SessionAttributionExplorerQuery | TracesQuery}
                 setQuery={setQuerySource}
             />
         ) : null,
@@ -420,10 +445,13 @@ export function DataTable({
         showSearch && sourceFeatures.has(QueryFeature.personsSearch) ? (
             <PersonsSearch key="persons-search" query={query.source as PersonsNode} setQuery={setQuerySource} />
         ) : null,
+        showSearch && sourceFeatures.has(QueryFeature.groupsSearch) ? (
+            <GroupsSearch key="groups-search" query={query.source as GroupsQuery} setQuery={setQuerySource} />
+        ) : null,
         showPropertyFilter && sourceFeatures.has(QueryFeature.eventPropertyFilters) ? (
             <EventPropertyFilters
                 key="event-property"
-                query={query.source as EventsQuery | HogQLQuery | SessionAttributionExplorerQuery}
+                query={query.source as EventsQuery | HogQLQuery | SessionAttributionExplorerQuery | TracesQuery}
                 setQuery={setQuerySource}
                 taxonomicGroupTypes={Array.isArray(showPropertyFilter) ? showPropertyFilter : undefined}
             />
@@ -434,6 +462,9 @@ export function DataTable({
                 query={query.source as PersonsNode}
                 setQuery={setQuerySource}
             />
+        ) : null,
+        showPropertyFilter && sourceFeatures.has(QueryFeature.groupPropertyFilters) ? (
+            <GroupPropertyFilters key="group-property" query={query.source as GroupsQuery} setQuery={setQuerySource} />
         ) : null,
     ].filter((x) => !!x)
 
@@ -490,7 +521,7 @@ export function DataTable({
                         <HogQLQueryEditor query={query.source} setQuery={setQuerySource} embedded={embedded} />
                     ) : null}
                     {showFirstRow && (
-                        <div className="flex gap-4 items-center flex-wrap">
+                        <div className="flex gap-x-4 gap-y-2 items-center flex-wrap">
                             {firstRowLeft}
                             {firstRowLeft.length > 0 && firstRowRight.length > 0 ? <div className="flex-1" /> : null}
                             {firstRowRight}
@@ -508,6 +539,7 @@ export function DataTable({
                     ) : null}
                     {showResultsTable && (
                         <LemonTable
+                            data-attr={dataAttr}
                             className="DataTable"
                             loading={responseLoading && !nextDataLoading && !newDataLoading}
                             columns={lemonColumns}
@@ -551,7 +583,11 @@ export function DataTable({
                                 expandable && columnsInResponse?.includes('*')
                                     ? {
                                           expandedRowRender: function renderExpand({ result }) {
-                                              if (isEventsQuery(query.source) && Array.isArray(result)) {
+                                              if (
+                                                  (isEventsQuery(query.source) ||
+                                                      isRevenueExampleEventsQuery(query.source)) &&
+                                                  Array.isArray(result)
+                                              ) {
                                                   return (
                                                       <EventDetails
                                                           event={result[columnsInResponse.indexOf('*')] ?? {}}
@@ -564,12 +600,6 @@ export function DataTable({
                                           },
                                           rowExpandable: ({ result }) => !!result,
                                           noIndent: true,
-                                          expandedRowClassName: ({ result }) => {
-                                              const record = Array.isArray(result) ? result[0] : result
-                                              return record && record['event'] === '$exception'
-                                                  ? 'border border-x-danger-dark bg-danger-highlight'
-                                                  : null
-                                          },
                                       }
                                     : undefined
                             }
@@ -578,7 +608,10 @@ export function DataTable({
                                     'DataTable__row--highlight_once': result && highlightedRows.has(result),
                                     'DataTable__row--category_row': !!label,
                                     'border border-x-danger-dark bg-danger-highlight':
-                                        result && result[0] && result[0]['event'] === '$exception',
+                                        sourceFeatures.has(QueryFeature.highlightExceptionEventRows) &&
+                                        result &&
+                                        result[0] &&
+                                        result[0]['event'] === '$exception',
                                 })
                             }
                             footer={

@@ -28,21 +28,37 @@ import { userLogic } from 'scenes/userLogic'
 import { dataNodeCollectionLogic, DataNodeCollectionProps } from '~/queries/nodes/DataNode/dataNodeCollectionLogic'
 import { removeExpressionComment } from '~/queries/nodes/DataTable/utils'
 import { performQuery } from '~/queries/query'
-import { DashboardFilter, HogQLVariable, QueryStatus } from '~/queries/schema'
 import {
     ActorsQuery,
     ActorsQueryResponse,
     AnyResponseType,
+    DashboardFilter,
     DataNode,
+    ErrorTrackingQuery,
+    ErrorTrackingQueryResponse,
     EventsQuery,
     EventsQueryResponse,
+    GroupsQuery,
+    GroupsQueryResponse,
     HogQLQueryModifiers,
+    HogQLVariable,
     InsightVizNode,
     NodeKind,
     PersonsNode,
+    QueryStatus,
     QueryTiming,
-} from '~/queries/schema'
-import { isActorsQuery, isEventsQuery, isInsightActorsQuery, isInsightQueryNode, isPersonsNode } from '~/queries/utils'
+    RefreshType,
+} from '~/queries/schema/schema-general'
+import {
+    isActorsQuery,
+    isErrorTrackingQuery,
+    isEventsQuery,
+    isGroupsQuery,
+    isHogQLQuery,
+    isInsightActorsQuery,
+    isInsightQueryNode,
+    isPersonsNode,
+} from '~/queries/utils'
 
 import type { dataNodeLogicType } from './dataNodeLogicType'
 
@@ -53,8 +69,8 @@ export interface DataNodeLogicProps {
     cachedResults?: AnyResponseType
     /** Disabled data fetching and only allow cached results. */
     doNotLoad?: boolean
-    /** Queries always get refreshed. */
-    alwaysRefresh?: boolean
+    /** Refresh behaviour for queries. */
+    refresh?: RefreshType
     /** Callback when data is successfully loader or provided from cache. */
     onData?: (data: Record<string, unknown> | null | undefined) => void
     /** Load priority. Higher priority (smaller number) queries will be loaded first. */
@@ -68,6 +84,9 @@ export interface DataNodeLogicProps {
     filtersOverride?: DashboardFilter | null
     /** Dashboard variables to override the ones in the query */
     variablesOverride?: Record<string, HogQLVariable> | null
+
+    /** Whether to automatically load data when the query changes. Used for manual override in SQL editor */
+    autoLoad?: boolean
 }
 
 export const AUTOLOAD_INTERVAL = 30000
@@ -101,7 +120,7 @@ export const dataNodeLogic = kea<dataNodeLogicType>([
             ],
         ],
     })),
-    props({ query: {}, variablesOverride: undefined } as DataNodeLogicProps),
+    props({ query: {}, variablesOverride: undefined, autoLoad: true } as DataNodeLogicProps),
     propsChanged(({ actions, props }, oldProps) => {
         if (!props.query) {
             return // Can't do anything without a query
@@ -115,21 +134,40 @@ export const dataNodeLogic = kea<dataNodeLogicType>([
         const queryStatus = (props.cachedResults?.query_status || null) as QueryStatus | null
         if (hasQueryChanged && queryStatus?.complete === false) {
             // If there is an incomplete query, load the data with the same query_id which should return its status
-            actions.loadData(queryVarsHaveChanged, queryStatus.id)
+            // We need to force a refresh in this case
+            const refreshType =
+                isInsightQueryNode(props.query) || isHogQLQuery(props.query) ? 'force_async' : 'force_blocking'
+            actions.loadData(refreshType, queryStatus.id)
         } else if (
             hasQueryChanged &&
+            props.autoLoad &&
             !(props.cachedResults && props.key.includes('dashboard')) && // Don't load data on dashboard if cached results are available
             (!props.cachedResults ||
-                (isInsightQueryNode(props.query) && !props.cachedResults['result'] && !props.cachedResults['results']))
+                (isInsightQueryNode(props.query) &&
+                    typeof props.cachedResults === 'object' &&
+                    !('result' in props.cachedResults) &&
+                    !('results' in props.cachedResults)))
         ) {
-            actions.loadData(queryVarsHaveChanged)
+            // For normal loads, use appropriate refresh type
+            const refreshType = queryVarsHaveChanged
+                ? isInsightQueryNode(props.query) || isHogQLQuery(props.query)
+                    ? 'force_async'
+                    : 'force_blocking'
+                : isInsightQueryNode(props.query) || isHogQLQuery(props.query)
+                ? 'async'
+                : 'blocking'
+            actions.loadData(refreshType)
         } else if (props.cachedResults) {
             // Use cached results if available, otherwise this logic will load the data again
             actions.setResponse(props.cachedResults)
         }
     }),
     actions({
-        loadData: (refresh = false, alreadyRunningQueryId?: string, overrideQuery?: DataNode<Record<string, any>>) => ({
+        loadData: (
+            refresh?: RefreshType,
+            alreadyRunningQueryId?: string,
+            overrideQuery?: DataNode<Record<string, any>>
+        ) => ({
             refresh,
             queryId: alreadyRunningQueryId || uuid(),
             pollOnly: !!alreadyRunningQueryId,
@@ -146,7 +184,8 @@ export const dataNodeLogic = kea<dataNodeLogicType>([
         highlightRows: (rows: any[]) => ({ rows }),
         setElapsedTime: (elapsedTime: number) => ({ elapsedTime }),
         setPollResponse: (status: QueryStatus | null) => ({ status }),
-        setLocalCache: (response: Record<string, any>) => response,
+        setLoadingTime: (seconds: number) => ({ seconds }),
+        resetLoadingTimer: true,
     }),
     loaders(({ actions, cache, values, props }) => ({
         response: [
@@ -156,24 +195,33 @@ export const dataNodeLogic = kea<dataNodeLogicType>([
                 clearResponse: () => null,
                 loadData: async ({ refresh: refreshArg, queryId, pollOnly, overrideQuery }, breakpoint) => {
                     const query = overrideQuery ?? props.query
-                    const refresh = props.alwaysRefresh || refreshArg
+                    // Use the explicit refresh type passed, or determine it based on query type
+                    // Default to non-force variants
+                    const refresh = refreshArg ?? (isInsightQueryNode(query) ? 'async' : 'blocking')
 
                     if (props.doNotLoad) {
                         return props.cachedResults
                     }
 
                     const queryStatus = (props.cachedResults?.query_status || null) as QueryStatus | null
-                    if (props.cachedResults && !refresh && queryStatus?.complete !== false) {
-                        if (props.cachedResults['result'] || props.cachedResults['results']) {
+                    if (
+                        props.cachedResults &&
+                        refresh !== 'force_async' &&
+                        refresh !== 'force_blocking' &&
+                        queryStatus?.complete !== false
+                    ) {
+                        if (
+                            typeof props.cachedResults === 'object' &&
+                            ('result' in props.cachedResults || 'results' in props.cachedResults)
+                        ) {
                             return props.cachedResults
                         }
                     }
 
-                    // if query based and locally cached, return the cached results
+                    // if no query, return null
                     if ('query' in query) {
-                        const stringifiedQuery = JSON.stringify(query.query)
-                        if (cache.localResults[stringifiedQuery] && !refresh) {
-                            return cache.localResults[stringifiedQuery]
+                        if (!query.query) {
+                            return null
                         }
                     }
 
@@ -198,7 +246,6 @@ export const dataNodeLogic = kea<dataNodeLogicType>([
                     const methodOptions: ApiMethodOptions = {
                         signal: cache.abortController.signal,
                     }
-
                     try {
                         const response = await concurrencyController.run({
                             debugTag: query.kind,
@@ -257,7 +304,7 @@ export const dataNodeLogic = kea<dataNodeLogicType>([
                             (await performQuery(
                                 addModifiers(values.newQuery, props.modifiers),
                                 undefined,
-                                props.alwaysRefresh
+                                props.refresh
                             )) ?? null
                         actions.setElapsedTime(performance.now() - now)
                         if (values.response === null) {
@@ -284,15 +331,24 @@ export const dataNodeLogic = kea<dataNodeLogicType>([
                     }
                     // TODO: unify when we use the same backend endpoint for both
                     const now = performance.now()
-                    if (isEventsQuery(props.query) || isActorsQuery(props.query)) {
+                    if (
+                        isEventsQuery(props.query) ||
+                        isActorsQuery(props.query) ||
+                        isGroupsQuery(props.query) ||
+                        isErrorTrackingQuery(props.query)
+                    ) {
                         const newResponse =
                             (await performQuery(
                                 addModifiers(values.nextQuery, props.modifiers),
                                 undefined,
-                                props.alwaysRefresh
+                                props.refresh
                             )) ?? null
                         actions.setElapsedTime(performance.now() - now)
-                        const queryResponse = values.response as EventsQueryResponse | ActorsQueryResponse
+                        const queryResponse = values.response as
+                            | EventsQueryResponse
+                            | ActorsQueryResponse
+                            | GroupsQueryResponse
+                            | ErrorTrackingQueryResponse
                         return {
                             ...queryResponse,
                             results: [...(queryResponse?.results ?? []), ...(newResponse?.results ?? [])],
@@ -303,7 +359,7 @@ export const dataNodeLogic = kea<dataNodeLogicType>([
                             (await performQuery(
                                 addModifiers(values.nextQuery, props.modifiers),
                                 undefined,
-                                props.alwaysRefresh
+                                props.refresh
                             )) ?? null
                         actions.setElapsedTime(performance.now() - now)
                         if (Array.isArray(values.response)) {
@@ -322,12 +378,19 @@ export const dataNodeLogic = kea<dataNodeLogicType>([
         ],
     })),
     reducers(({ props }) => ({
+        isRefresh: [
+            false,
+            {
+                loadData: (_, { refresh }) => !!refresh,
+            },
+        ],
         dataLoading: [
             false,
             {
                 loadData: () => true,
                 loadDataSuccess: () => false,
                 loadDataFailure: () => false,
+                cancelQuery: () => false,
             },
         ],
         queryId: [
@@ -342,6 +405,7 @@ export const dataNodeLogic = kea<dataNodeLogicType>([
                 loadNewData: () => true,
                 loadNewDataSuccess: () => false,
                 loadNewDataFailure: () => false,
+                cancelQuery: () => false,
             },
         ],
         nextDataLoading: [
@@ -350,6 +414,7 @@ export const dataNodeLogic = kea<dataNodeLogicType>([
                 loadNextData: () => true,
                 loadNextDataSuccess: () => false,
                 loadNextDataFailure: () => false,
+                cancelQuery: () => false,
             },
         ],
         queryCancelled: [
@@ -396,6 +461,7 @@ export const dataNodeLogic = kea<dataNodeLogicType>([
                 loadData: () => performance.now(),
                 loadNewData: () => performance.now(),
                 loadNextData: () => performance.now(),
+                cancelQuery: () => null,
             },
         ],
         response: {
@@ -444,12 +510,17 @@ export const dataNodeLogic = kea<dataNodeLogicType>([
                 loadData: () => null,
                 loadNewData: () => null,
                 loadNextData: () => null,
+                cancelQuery: () => null,
             },
         ],
-        localCache: [
-            {} as Record<string, any>,
+        loadingTimeSeconds: [
+            0,
             {
-                setLocalCache: (state, response) => ({ ...state, ...response }),
+                loadData: () => 0,
+                loadDataSuccess: () => 0,
+                loadDataFailure: () => 0,
+                setLoadingTime: (_, { seconds }) => seconds,
+                cancelQuery: () => 0,
             },
         ],
     })),
@@ -459,8 +530,12 @@ export const dataNodeLogic = kea<dataNodeLogicType>([
             (variablesOverride) => !!variablesOverride,
         ],
         isShowingCachedResults: [
-            () => [(_, props) => props.cachedResults ?? null, (_, props) => props.query],
-            (cachedResults: AnyResponseType | null, query: DataNode): boolean => {
+            (s) => [(_, props) => props.cachedResults ?? null, (_, props) => props.query, s.isRefresh],
+            (cachedResults: AnyResponseType | null, query: DataNode, isRefresh): boolean => {
+                if (isRefresh) {
+                    return false
+                }
+
                 return (
                     !!cachedResults ||
                     (cache.localResults && 'query' in query && JSON.stringify(query.query) in cache.localResults)
@@ -505,11 +580,26 @@ export const dataNodeLogic = kea<dataNodeLogicType>([
                     return null
                 }
 
-                if ((isEventsQuery(query) || isActorsQuery(query)) && !responseError && !dataLoading) {
-                    if ((response as EventsQueryResponse | ActorsQueryResponse)?.hasMore) {
+                if (
+                    (isEventsQuery(query) ||
+                        isActorsQuery(query) ||
+                        isGroupsQuery(query) ||
+                        isErrorTrackingQuery(query)) &&
+                    !responseError &&
+                    !dataLoading
+                ) {
+                    if (
+                        (
+                            response as
+                                | EventsQueryResponse
+                                | ActorsQueryResponse
+                                | GroupsQueryResponse
+                                | ErrorTrackingQueryResponse
+                        )?.hasMore
+                    ) {
                         const sortKey = query.orderBy?.[0] ?? 'timestamp DESC'
-                        const typedResults = (response as EventsQueryResponse | ActorsQueryResponse)?.results
                         if (isEventsQuery(query) && sortKey === 'timestamp DESC') {
+                            const typedResults = (response as EventsQueryResponse)?.results
                             const sortColumnIndex = query.select
                                 .map((hql) => removeExpressionComment(hql))
                                 .indexOf('timestamp')
@@ -528,11 +618,18 @@ export const dataNodeLogic = kea<dataNodeLogicType>([
                                 }
                             }
                         } else {
+                            const typedResults = (
+                                response as
+                                    | EventsQueryResponse
+                                    | ActorsQueryResponse
+                                    | GroupsQueryResponse
+                                    | ErrorTrackingQueryResponse
+                            )?.results
                             return {
                                 ...query,
                                 offset: typedResults?.length || 0,
                                 limit: Math.max(100, Math.min(2 * (typedResults?.length || 100), LOAD_MORE_ROWS_LIMIT)),
-                            } as EventsQuery | ActorsQuery
+                            } as EventsQuery | ActorsQuery | GroupsQuery | ErrorTrackingQuery
                         }
                     }
                 }
@@ -608,23 +705,26 @@ export const dataNodeLogic = kea<dataNodeLogicType>([
             (s) => [s.nextAllowedRefresh, s.lastRefresh],
             (nextAllowedRefresh: string | null, lastRefresh: string | null) => (): string => {
                 const now = dayjs()
-                let disabledReason = ''
-                if (!!nextAllowedRefresh && now.isBefore(dayjs(nextAllowedRefresh))) {
-                    // If this is a saved insight, the result will contain nextAllowedRefresh, and we use that to disable the button
-                    disabledReason = `You can refresh this insight again ${dayjs(nextAllowedRefresh).from(now)}`
-                } else if (
-                    !!lastRefresh &&
-                    now.subtract(UNSAVED_INSIGHT_MIN_REFRESH_INTERVAL_MINUTES - 0.5, 'minutes').isBefore(lastRefresh)
-                ) {
-                    // Unsaved insights don't get cached and get refreshed on every page load, but we avoid allowing users to click
-                    // 'refresh' more than once every UNSAVED_INSIGHT_MIN_REFRESH_INTERVAL_MINUTES. This can be bypassed by simply
-                    // refreshing the page though, as there's no cache layer on the backend
-                    disabledReason = `You can refresh this insight again ${dayjs(lastRefresh)
-                        .add(UNSAVED_INSIGHT_MIN_REFRESH_INTERVAL_MINUTES, 'minutes')
-                        .from(now)}`
+                // Saved insights has a nextAllowedRefresh we use to check if the user can refresh again
+                if (nextAllowedRefresh) {
+                    const nextRefreshTime = dayjs(nextAllowedRefresh)
+                    if (now.isBefore(nextRefreshTime)) {
+                        return `You can refresh this insight again ${nextRefreshTime.from(now)}`
+                    }
                 }
-
-                return disabledReason
+                // For unsaved insights we check the last refresh time
+                if (lastRefresh) {
+                    const earliestRefresh = dayjs(lastRefresh).add(
+                        UNSAVED_INSIGHT_MIN_REFRESH_INTERVAL_MINUTES,
+                        'minutes'
+                    )
+                    if (now.isBefore(earliestRefresh)) {
+                        return `You can refresh this insight again ${earliestRefresh.from(now)}`
+                    }
+                }
+                // If we don't have a nextAllowedRefresh or lastRefresh, we can refresh, so we
+                // return an empty string
+                return ''
             },
         ],
         timings: [
@@ -666,9 +766,11 @@ export const dataNodeLogic = kea<dataNodeLogicType>([
         },
         cancelQuery: () => {
             actions.abortAnyRunningQuery()
+            actions.resetLoadingTimer()
         },
         loadData: () => {
             actions.collectionNodeLoadData(props.key)
+            actions.resetLoadingTimer()
         },
         loadDataSuccess: ({ response }) => {
             props.onData?.(response)
@@ -686,6 +788,20 @@ export const dataNodeLogic = kea<dataNodeLogicType>([
         loadNextDataSuccess: ({ response }) => {
             props.onData?.(response)
         },
+        resetLoadingTimer: () => {
+            if (cache.loadingTimer) {
+                window.clearInterval(cache.loadingTimer)
+                cache.loadingTimer = null
+            }
+
+            if (values.dataLoading) {
+                const startTime = Date.now()
+                cache.loadingTimer = window.setInterval(() => {
+                    const seconds = Math.floor((Date.now() - startTime) / 1000)
+                    actions.setLoadingTime(seconds)
+                }, 1000)
+            }
+        },
     })),
     subscriptions(({ actions, cache, values }) => ({
         autoLoadRunning: (autoLoadRunning) => {
@@ -702,6 +818,12 @@ export const dataNodeLogic = kea<dataNodeLogicType>([
                 }, AUTOLOAD_INTERVAL)
             }
         },
+        dataLoading: (dataLoading) => {
+            if (cache.loadingTimer && !dataLoading) {
+                window.clearInterval(cache.loadingTimer)
+                cache.loadingTimer = null
+            }
+        },
     })),
     afterMount(({ actions, props, cache }) => {
         cache.localResults = {}
@@ -710,8 +832,10 @@ export const dataNodeLogic = kea<dataNodeLogicType>([
             // We need to set them here, as the propsChanged listener will not trigger on mount
             // and if we never change the props, the cached results will never be used.
             actions.setResponse(props.cachedResults)
-        } else if (Object.keys(props.query || {}).length > 0) {
-            actions.loadData()
+        } else if (props.autoLoad && Object.keys(props.query || {}).length > 0) {
+            // Initial load should use non-force variant
+            const refreshType = isInsightQueryNode(props.query) ? 'async' : 'blocking'
+            actions.loadData(refreshType)
         }
 
         actions.mountDataNode(props.key, {
@@ -720,7 +844,7 @@ export const dataNodeLogic = kea<dataNodeLogicType>([
             cancelQuery: actions.cancelQuery,
         })
     }),
-    beforeUnmount(({ actions, props, values }) => {
+    beforeUnmount(({ actions, props, values, cache }) => {
         if (values.autoLoadRunning) {
             actions.stopAutoLoad()
         }
@@ -729,5 +853,9 @@ export const dataNodeLogic = kea<dataNodeLogicType>([
         }
 
         actions.unmountDataNode(props.key)
+        if (cache.loadingTimer) {
+            window.clearInterval(cache.loadingTimer)
+            cache.loadingTimer = null
+        }
     }),
 ])

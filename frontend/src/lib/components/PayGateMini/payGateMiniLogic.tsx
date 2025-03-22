@@ -1,4 +1,4 @@
-import { actions, connect, kea, key, path, props, selectors } from 'kea'
+import { actions, connect, kea, key, path, props, reducers, selectors } from 'kea'
 import { billingLogic } from 'scenes/billing/billingLogic'
 import { preflightLogic } from 'scenes/PreflightCheck/preflightLogic'
 import { userLogic } from 'scenes/userLogic'
@@ -29,8 +29,17 @@ export const payGateMiniLogic = kea<payGateMiniLogicType>([
         ],
         actions: [],
     })),
+    reducers({
+        bypassPaywall: [
+            false,
+            {
+                setBypassPaywall: (_, { bypassPaywall }) => bypassPaywall,
+            },
+        ],
+    }),
     actions({
         setGateVariant: (gateVariant: GateVariantType) => ({ gateVariant }),
+        setBypassPaywall: (bypassPaywall: boolean) => ({ bypassPaywall }),
     }),
     selectors(({ values, props }) => ({
         productWithFeature: [
@@ -38,7 +47,7 @@ export const payGateMiniLogic = kea<payGateMiniLogicType>([
             (billing) => {
                 // TODO(@zach): revisit this logic after subscribe to all products is released
                 // There are some features where we want to check the product first
-                const checkProductFirst = [AvailableFeature.ORGANIZATIONS_PROJECTS]
+                const checkProductFirst = [AvailableFeature.ORGANIZATIONS_PROJECTS, AvailableFeature.ENVIRONMENTS]
 
                 let foundProduct: BillingProductV2Type | BillingProductV2AddonType | undefined = undefined
 

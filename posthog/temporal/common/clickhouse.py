@@ -6,14 +6,15 @@ import json
 import ssl
 import typing
 import uuid
-import structlog
 
 import aiohttp
 import pyarrow as pa
 import requests
+import structlog
 from django.conf import settings
 
 import posthog.temporal.common.asyncpa as asyncpa
+from posthog.temporal.common.logger import get_internal_logger
 
 logger = structlog.get_logger()
 
@@ -34,7 +35,9 @@ def encode_clickhouse_data(data: typing.Any, quote_char="'") -> bytes:
             return f"{quote_char}{data}{quote_char}".encode()
 
         case int() | float():
-            return b"%d" % data
+            if isinstance(data, float) and data.is_integer():
+                return f"{int(data)}".encode()
+            return f"{data}".encode()
 
         case dt.datetime():
             timezone_arg = ""
@@ -119,6 +122,13 @@ class ClickHouseError(Exception):
         super().__init__(error_message)
 
 
+class ClickHouseAllReplicasAreStaleError(ClickHouseError):
+    """Exception raised when all replicas are stale."""
+
+    def __init__(self, query, error_message):
+        super().__init__(query, error_message)
+
+
 class ClickHouseClient:
     """An asynchronous client to access ClickHouse via HTTP.
 
@@ -147,6 +157,9 @@ class ClickHouseClient:
         self.ssl = ssl
         self.connector: None | aiohttp.TCPConnector = None
         self.session: None | aiohttp.ClientSession = None
+
+        logger = get_internal_logger()
+        self.logger = logger.bind(url=url, database=database, user=user)
 
         if user:
             self.headers["X-ClickHouse-User"] = user
@@ -184,7 +197,8 @@ class ClickHouseClient:
                 headers=self.headers,
                 raise_for_status=True,
             )
-        except aiohttp.ClientResponseError:
+        except aiohttp.ClientResponseError as exc:
+            await self.logger.aexception("Failed ClickHouse liveness check", exc_info=exc)
             return False
         return True
 
@@ -219,20 +233,30 @@ class ClickHouseClient:
         """Asynchronously check the HTTP response received from ClickHouse.
 
         Raises:
+            ClickHouseAllReplicasAreStaleError: If status code is not 200 and error message contains
+                "ALL_REPLICAS_ARE_STALE". This can happen when using max_replica_delay_for_distributed_queries
+                and fallback_to_stale_replicas_for_distributed_queries=0
             ClickHouseError: If the status code is not 200.
         """
         if response.status != 200:
             error_message = await response.text()
+            if "ALL_REPLICAS_ARE_STALE" in error_message:
+                raise ClickHouseAllReplicasAreStaleError(query, error_message)
             raise ClickHouseError(query, error_message)
 
     def check_response(self, response, query) -> None:
         """Check the HTTP response received from ClickHouse.
 
         Raises:
+            ClickHouseAllReplicasAreStaleError: If status code is not 200 and error message contains
+                "ALL_REPLICAS_ARE_STALE". This can happen when using max_replica_delay_for_distributed_queries
+                and fallback_to_stale_replicas_for_distributed_queries=0
             ClickHouseError: If the status code is not 200.
         """
         if response.status_code != 200:
             error_message = response.text
+            if "ALL_REPLICAS_ARE_STALE" in error_message:
+                raise ClickHouseAllReplicasAreStaleError(query, error_message)
             raise ClickHouseError(query, error_message)
 
     @contextlib.asynccontextmanager
@@ -244,6 +268,9 @@ class ClickHouseClient:
         Only read-only queries may be sent as a GET request. For inserts, use apost_query.
 
         The context manager protocol is used to control when to release the response.
+
+        Query parameters will be formatted with string formatting and additionally sent to
+        ClickHouse in the query string.
 
         Arguments:
             query: The query to POST.
@@ -261,7 +288,14 @@ class ClickHouseClient:
         if query_id is not None:
             params["query_id"] = query_id
 
+        # Certain views, like person_batch_exports* still rely on us formatting arguments.
         params["query"] = self.prepare_query(query, query_parameters)
+
+        # TODO: Let clickhouse handle all parameter formatting.
+        if query_parameters is not None:
+            for key, value in query_parameters.items():
+                if key in query:
+                    params[f"param_{key}"] = str(value)
 
         async with self.session.get(url=self.url, headers=self.headers, params=params) as response:
             await self.acheck_response(response, query)
@@ -275,6 +309,9 @@ class ClickHouseClient:
 
         The context manager protocol is used to control when to release the response.
 
+        Query parameters will be formatted with string formatting and additionally sent to
+        ClickHouse in the query string.
+
         Arguments:
             query: The query to POST.
             *data: Iterable of values to include in the body of the request. For example, the tuples of VALUES for an INSERT query.
@@ -291,7 +328,15 @@ class ClickHouseClient:
         if query_id is not None:
             params["query_id"] = query_id
 
+        # Certain views, like person_batch_exports* still rely on us formatting arguments.
         query = self.prepare_query(query, query_parameters)
+
+        # TODO: Let clickhouse handle all parameter formatting.
+        if query_parameters is not None:
+            for key, value in query_parameters.items():
+                if key in query:
+                    params[f"param_{key}"] = str(value)
+
         request_data = self.prepare_request_data(data)
 
         if request_data:
@@ -309,6 +354,9 @@ class ClickHouseClient:
 
         The context manager protocol is used to control when to release the response.
 
+        Query parameters will be formatted with string formatting and additionally sent to
+        ClickHouse in the query string.
+
         Arguments:
             query: The query to POST.
             *data: Iterable of values to include in the body of the request. For example, the tuples of VALUES for an INSERT query.
@@ -329,6 +377,12 @@ class ClickHouseClient:
             params["query"] = query
         else:
             request_data = query.encode("utf-8")
+
+        # TODO: Let clickhouse handle all parameter formatting.
+        if query_parameters is not None:
+            for key, value in query_parameters.items():
+                if key in query:
+                    params[f"param_{key}"] = str(value)
 
         with requests.Session() as s:
             response = s.post(
@@ -455,7 +509,7 @@ class ClickHouseClient:
 
 @contextlib.asynccontextmanager
 async def get_client(
-    *, team_id: typing.Optional[int] = None, **kwargs
+    *, team_id: typing.Optional[int] = None, clickhouse_url: str | None = None, **kwargs
 ) -> collections.abc.AsyncIterator[ClickHouseClient]:
     """
     Returns a ClickHouse client based on the aiochclient library. This is an
@@ -464,7 +518,7 @@ async def get_client(
     Usage:
 
         async with get_client() as client:
-            await client.execute("SELECT 1")
+            await client.apost_query("SELECT 1")
 
     Note that this is not a connection pool, so you should not use this for
     queries that are run frequently.
@@ -489,14 +543,20 @@ async def get_client(
     timeout = aiohttp.ClientTimeout(total=None, connect=None, sock_connect=30, sock_read=None)
 
     if team_id is None:
-        max_block_size = settings.CLICKHOUSE_MAX_BLOCK_SIZE_DEFAULT
+        default_max_block_size = settings.CLICKHOUSE_MAX_BLOCK_SIZE_DEFAULT
     else:
-        max_block_size = settings.CLICKHOUSE_MAX_BLOCK_SIZE_OVERRIDES.get(
+        default_max_block_size = settings.CLICKHOUSE_MAX_BLOCK_SIZE_OVERRIDES.get(
             team_id, settings.CLICKHOUSE_MAX_BLOCK_SIZE_DEFAULT
         )
+    max_block_size = kwargs.pop("max_block_size", None) or default_max_block_size
+
+    if clickhouse_url is None:
+        url = settings.CLICKHOUSE_OFFLINE_HTTP_URL
+    else:
+        url = clickhouse_url
 
     async with ClickHouseClient(
-        url=settings.CLICKHOUSE_OFFLINE_HTTP_URL,
+        url=url,
         user=settings.CLICKHOUSE_USER,
         password=settings.CLICKHOUSE_PASSWORD,
         database=settings.CLICKHOUSE_DATABASE,
@@ -505,7 +565,9 @@ async def get_client(
         max_execution_time=settings.CLICKHOUSE_MAX_EXECUTION_TIME,
         max_memory_usage=settings.CLICKHOUSE_MAX_MEMORY_USAGE,
         max_block_size=max_block_size,
+        cancel_http_readonly_queries_on_client_close=1,
         output_format_arrow_string_as_string="true",
+        http_send_timeout=0,
         **kwargs,
     ) as client:
         yield client

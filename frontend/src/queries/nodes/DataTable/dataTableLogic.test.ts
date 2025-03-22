@@ -4,7 +4,7 @@ import { featureFlagLogic } from 'lib/logic/featureFlagLogic'
 import { dataNodeLogic } from '~/queries/nodes/DataNode/dataNodeLogic'
 import { dataTableLogic } from '~/queries/nodes/DataTable/dataTableLogic'
 import { performQuery } from '~/queries/query'
-import { DataTableNode, NodeKind } from '~/queries/schema'
+import { DataTableNode, NodeKind } from '~/queries/schema/schema-general'
 import { initKeaTests } from '~/test/init'
 
 jest.mock('~/queries/query')
@@ -61,9 +61,9 @@ describe('dataTableLogic', () => {
         })
 
         expect(performQuery).toHaveBeenCalledWith(
-            dataTableQuery.source,
-            expect.anything(),
-            false,
+            { kind: 'EventsQuery', select: ['*', 'event', 'timestamp'] },
+            { signal: expect.any(Object) },
+            'blocking',
             expect.any(String),
             expect.any(Function),
             undefined,

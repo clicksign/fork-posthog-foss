@@ -1,4 +1,7 @@
+import os
 from typing import TYPE_CHECKING, Optional
+import posthoganalytics
+from posthoganalytics.ai.openai import OpenAI
 import openai
 from posthog.event_usage import report_user_action
 from posthog.hogql.context import HogQLContext
@@ -12,11 +15,14 @@ from .query import create_default_modifiers_for_team
 if TYPE_CHECKING:
     from posthog.models import User, Team
 
+openai_client = OpenAI(posthog_client=posthoganalytics) if os.getenv("OPENAI_API_KEY") else None  # type: ignore
+
 UNCLEAR_PREFIX = "UNCLEAR:"
 
 IDENTITY_MESSAGE = "HogQL is PostHog's variant of SQL. It supports most of ClickHouse SQL. You write HogQL based on a prompt. You don't help with other knowledge."
 
 HOGQL_EXAMPLE_MESSAGE = """Example HogQL query for prompt "weekly active users that performed event ACTIVATION_EVENT on example.com/foo/ 3 times or more, by week":
+
 SELECT week_of, countIf(weekly_event_count >= 3)
 FROM (
    SELECT person.id AS person_id, toStartOfWeek(timestamp) AS week_of, count() AS weekly_event_count
@@ -33,7 +39,8 @@ ORDER BY week_of DESC"""
 
 SCHEMA_MESSAGE = (
     "This project's schema is:\n\n{schema_description}\nPerson or event metadata unspecified above (emails, names, etc.) "
-    'is stored in `properties` fields, accessed like: `properties.foo.bar`. Note: "persons" means "users".\nSpecial events/properties such as pageview or screen start with `$`. Custom ones don\'t.'
+    'is stored in `properties` fields, accessed like: `properties.foo.bar`. Note: "persons" means "users".\nSpecial events/properties such as pageview or screen start with `$`. Custom ones don\'t.\n'
+    "virtual_table and lazy_table fields are connections to linked tables, e.g. the `person` table allows accessing person properties like so: `person.properties.foo`."
 )
 
 CURRENT_QUERY_MESSAGE = (
@@ -42,8 +49,8 @@ CURRENT_QUERY_MESSAGE = (
 
 REQUEST_MESSAGE = (
     "I need a robust HogQL query to get the following results: {prompt}\n"
-    "Return nothing besides the SQL, just the query. "
-    f'If my request doesn\'t make sense, return short and succint message starting with "{UNCLEAR_PREFIX}". '
+    "Return nothing besides the SQL, just the query. Do not wrap the SQL in backticks or quotes. "
+    f'If my request is irrelevant or doesn\'t make sense, return a short and succint message starting with "{UNCLEAR_PREFIX}". '
 )
 
 
@@ -145,9 +152,12 @@ def write_sql_from_prompt(prompt: str, *, current_query: Optional[str] = None, t
 
 
 def hit_openai(messages, user) -> tuple[str, int, int]:
-    result = openai.chat.completions.create(
+    if not openai_client:
+        raise ValueError("OPENAI_API_KEY environment variable not set")
+
+    result = openai_client.chat.completions.create(
         model="gpt-4o-mini",
-        temperature=0.8,
+        temperature=0,
         messages=messages,
         user=user,  # The user ID is for tracking within OpenAI in case of overuse/abuse
     )

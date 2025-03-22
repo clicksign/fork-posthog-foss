@@ -4,7 +4,7 @@ import { subscriptions } from 'kea-subscriptions'
 import api from 'lib/api'
 import { TaxonomicFilterGroupType } from 'lib/components/TaxonomicFilter/types'
 import { groupsAccessLogic, GroupsAccessStatus } from 'lib/introductions/groupsAccessLogic'
-import { teamLogic } from 'scenes/teamLogic'
+import { projectLogic } from 'scenes/projectLogic'
 
 import { GroupType, GroupTypeIndex } from '~/types'
 
@@ -18,23 +18,30 @@ export interface Noun {
 export const groupsModel = kea<groupsModelType>([
     path(['models', 'groupsModel']),
     connect({
-        values: [teamLogic, ['currentTeamId'], groupsAccessLogic, ['groupsEnabled', 'groupsAccessStatus']],
+        values: [projectLogic, ['currentProjectId'], groupsAccessLogic, ['groupsEnabled', 'groupsAccessStatus']],
     }),
     loaders(({ values }) => ({
         groupTypesRaw: [
             [] as Array<GroupType>,
             {
                 loadAllGroupTypes: async () => {
-                    return await api.get(`api/projects/${values.currentTeamId}/groups_types`)
+                    return await api.get(`api/projects/${values.currentProjectId}/groups_types`)
                 },
                 updateGroupTypesMetadata: async (payload: Array<GroupType>) => {
                     if (values.groupsEnabled) {
                         return await api.update(
-                            `/api/projects/${teamLogic.values.currentTeamId}/groups_types/update_metadata`,
+                            `/api/projects/${values.currentProjectId}/groups_types/update_metadata`,
                             payload
                         )
                     }
                     return []
+                },
+                createDetailDashboard: async (groupTypeIndex: number) => {
+                    const groupType = await api.put(
+                        `/api/projects/${values.currentProjectId}/groups_types/create_detail_dashboard`,
+                        { group_type_index: groupTypeIndex }
+                    )
+                    return values.groupTypesRaw.map((gt) => (gt.group_type_index === groupTypeIndex ? groupType : gt))
                 },
             },
         ],

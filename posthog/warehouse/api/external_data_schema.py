@@ -51,6 +51,7 @@ class ExternalDataSchemaSerializer(serializers.ModelSerializer):
     incremental_field_type = serializers.SerializerMethodField(read_only=True)
     sync_frequency = serializers.SerializerMethodField(read_only=True)
     status = serializers.SerializerMethodField(read_only=True)
+    sync_time_of_day = serializers.SerializerMethodField(read_only=True)
 
     class Meta:
         model = ExternalDataSchema
@@ -68,6 +69,7 @@ class ExternalDataSchemaSerializer(serializers.ModelSerializer):
             "incremental_field",
             "incremental_field_type",
             "sync_frequency",
+            "sync_time_of_day",
         ]
 
         read_only_fields = [
@@ -107,7 +109,10 @@ class ExternalDataSchemaSerializer(serializers.ModelSerializer):
         return SimpleTableSerializer(schema.table, context={"database": hogql_context}).data or None
 
     def get_sync_frequency(self, schema: ExternalDataSchema):
-        return sync_frequency_interval_to_sync_frequency(schema)
+        return sync_frequency_interval_to_sync_frequency(schema.sync_frequency_interval)
+
+    def get_sync_time_of_day(self, schema: ExternalDataSchema):
+        return schema.sync_time_of_day
 
     def update(self, instance: ExternalDataSchema, validated_data: dict[str, Any]) -> ExternalDataSchema:
         data = self.context["request"].data
@@ -123,36 +128,40 @@ class ExternalDataSchemaSerializer(serializers.ModelSerializer):
 
         validated_data["sync_type"] = sync_type
 
-        # Check whether we need a full table refresh
         trigger_refresh = False
-        if instance.sync_type is not None and sync_type is not None:
-            # If sync type changes
-            if instance.sync_type != sync_type:
-                trigger_refresh = True
-
-            # If sync type is incremental and the incremental field changes
-            if sync_type == ExternalDataSchema.SyncType.INCREMENTAL and instance.sync_type_config.get(
-                "incremental_field"
-            ) != data.get("incremental_field"):
-                trigger_refresh = True
-
         # Update the validated_data with incremental fields
-        if sync_type == "incremental":
+        if sync_type == ExternalDataSchema.SyncType.INCREMENTAL:
+            incremental_field_changed = (
+                instance.sync_type_config.get("incremental_field") != data.get("incremental_field")
+                or instance.sync_type_config.get("incremental_field_last_value") is None
+            )
+
             payload = instance.sync_type_config
             payload["incremental_field"] = data.get("incremental_field")
             payload["incremental_field_type"] = data.get("incremental_field_type")
 
-            validated_data["sync_type_config"] = payload
-        else:
-            payload = instance.sync_type_config
-            payload.pop("incremental_field", None)
-            payload.pop("incremental_field_type", None)
+            # If the incremental field has changed
+            if incremental_field_changed:
+                if instance.table is not None:
+                    # Get the max_value and set it on incremental_field_last_value
+                    max_value = instance.table.get_max_value_for_column(data.get("incremental_field"))
+                    if max_value:
+                        instance.update_incremental_field_last_value(max_value, save=False)
+                    else:
+                        # if we can't get the max value, reset the table
+                        payload["incremental_field_last_value"] = None
+                        trigger_refresh = True
 
             validated_data["sync_type_config"] = payload
+        else:
+            # No need to update sync_type_config for full refresh sync_type - it'll happen on the next sync
+            pass
 
         should_sync = validated_data.get("should_sync", None)
         sync_frequency = data.get("sync_frequency", None)
+        sync_time_of_day = data.get("sync_time_of_day", None)
         was_sync_frequency_updated = False
+        was_sync_time_of_day_updated = False
 
         if sync_frequency:
             sync_frequency_interval = sync_frequency_to_sync_frequency_interval(sync_frequency)
@@ -161,6 +170,12 @@ class ExternalDataSchemaSerializer(serializers.ModelSerializer):
                 was_sync_frequency_updated = True
                 validated_data["sync_frequency_interval"] = sync_frequency_interval
                 instance.sync_frequency_interval = sync_frequency_interval
+
+        if sync_time_of_day is not None:
+            if sync_time_of_day != instance.sync_time_of_day:
+                was_sync_time_of_day_updated = True
+                validated_data["sync_time_of_day"] = sync_time_of_day
+                instance.sync_time_of_day = sync_time_of_day
 
         if should_sync is True and sync_type is None and instance.sync_type is None:
             raise ValidationError("Sync type must be set up first before enabling schema")
@@ -176,13 +191,13 @@ class ExternalDataSchemaSerializer(serializers.ModelSerializer):
             if should_sync is True:
                 sync_external_data_job_workflow(instance, create=True)
 
-        if was_sync_frequency_updated:
+        if was_sync_frequency_updated or was_sync_time_of_day_updated:
             sync_external_data_job_workflow(instance, create=False)
 
         if trigger_refresh:
-            source: ExternalDataSource = instance.source
-            source.job_inputs.update({"reset_pipeline": True})
-            source.save()
+            instance.sync_type_config.update({"reset_pipeline": True})
+            validated_data["sync_type_config"].update({"reset_pipeline": True})
+
             trigger_external_data_workflow(instance)
 
         return super().update(instance, validated_data)
@@ -262,9 +277,7 @@ class ExternalDataSchemaViewset(TeamAndOrgViewSetMixin, LogEntryMixin, viewsets.
         if latest_running_job and latest_running_job.workflow_id and latest_running_job.status == "Running":
             cancel_external_data_workflow(latest_running_job.workflow_id)
 
-        source: ExternalDataSource = instance.source
-        source.job_inputs.update({"reset_pipeline": True})
-        source.save()
+        instance.sync_type_config.update({"reset_pipeline": True})
 
         try:
             trigger_external_data_workflow(instance)
@@ -303,6 +316,8 @@ class ExternalDataSchemaViewset(TeamAndOrgViewSetMixin, LogEntryMixin, viewsets.
             ssh_tunnel_auth_type_passphrase = source.job_inputs.get("ssh_tunnel_auth_type_passphrase")
             ssh_tunnel_auth_type_private_key = source.job_inputs.get("ssh_tunnel_auth_type_private_key")
 
+            using_ssl = str(source.job_inputs.get("using_ssl", True)) == "True"
+
             ssh_tunnel = SSHTunnel(
                 enabled=using_ssh_tunnel,
                 host=ssh_tunnel_host,
@@ -323,6 +338,7 @@ class ExternalDataSchemaViewset(TeamAndOrgViewSetMixin, LogEntryMixin, viewsets.
                 password=password,
                 schema=pg_schema,
                 ssh_tunnel=ssh_tunnel,
+                using_ssl=using_ssl,
             )
 
             columns = db_schemas.get(instance.name, [])
@@ -347,14 +363,23 @@ class ExternalDataSchemaViewset(TeamAndOrgViewSetMixin, LogEntryMixin, viewsets.
             sf_schema = source.job_inputs.get("schema")
             role = source.job_inputs.get("role")
 
+            auth_type = source.job_inputs.get("auth_type", "password")
+            auth_type_username = source.job_inputs.get("user")
+            auth_type_password = source.job_inputs.get("password")
+            auth_type_passphrase = source.job_inputs.get("passphrase")
+            auth_type_private_key = source.job_inputs.get("private_key")
+
             sf_schemas = get_snowflake_schemas(
                 account_id=account_id,
                 database=database,
                 warehouse=warehouse,
-                user=user,
-                password=password,
+                user=auth_type_username,
+                password=auth_type_password,
                 schema=sf_schema,
                 role=role,
+                auth_type=auth_type,
+                passphrase=auth_type_passphrase,
+                private_key=auth_type_private_key,
             )
 
             columns = sf_schemas.get(instance.name, [])

@@ -1,8 +1,8 @@
-use std::collections::HashMap;
-
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{digest::Update, Sha512};
+use std::collections::{HashMap, HashSet};
+use std::hash::Hash;
 use uuid::Uuid;
 
 use crate::frames::{Frame, RawFrame};
@@ -33,6 +33,7 @@ pub struct Exception {
     pub exception_type: String,
     #[serde(rename = "value")]
     pub exception_message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub mechanism: Option<Mechanism>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub module: Option<String>,
@@ -49,6 +50,11 @@ pub struct Exception {
 pub struct RawErrProps {
     #[serde(rename = "$exception_list")]
     pub exception_list: Vec<Exception>,
+    #[serde(
+        rename = "$exception_fingerprint",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub fingerprint: Option<String>, // Clients can send us fingerprints, which we'll use if present
     #[serde(flatten)]
     // A catch-all for all the properties we don't "care" about, so when we send back to kafka we don't lose any info
     pub other: HashMap<String, Value>,
@@ -57,6 +63,7 @@ pub struct RawErrProps {
 pub struct FingerprintedErrProps {
     pub exception_list: Vec<Exception>,
     pub fingerprint: String,
+    pub proposed_fingerprint: String, // We suggest a fingerprint, based on hashes, but let users override client-side
     pub other: HashMap<String, Value>,
 }
 
@@ -67,17 +74,29 @@ pub struct OutputErrProps {
     pub exception_list: Vec<Exception>,
     #[serde(rename = "$exception_fingerprint")]
     pub fingerprint: String,
+    #[serde(rename = "$exception_proposed_fingerprint")]
+    pub proposed_fingerprint: String,
     #[serde(rename = "$exception_issue_id")]
     pub issue_id: Uuid,
     #[serde(flatten)]
     pub other: HashMap<String, Value>,
+
+    // Search metadata
+    #[serde(rename = "$exception_types")]
+    pub types: Vec<String>,
+    #[serde(rename = "$exception_values")]
+    pub values: Vec<String>,
+    #[serde(rename = "$exception_sources")]
+    pub sources: Vec<String>,
+    #[serde(rename = "$exception_functions")]
+    pub functions: Vec<String>,
 }
 
 impl Exception {
     pub fn include_in_fingerprint(&self, h: &mut Sha512) {
         h.update(self.exception_type.as_bytes());
-        h.update(self.exception_message.as_bytes());
         let Some(Stacktrace::Resolved { frames }) = &self.stack else {
+            h.update(self.exception_message.as_bytes());
             return;
         };
 
@@ -119,7 +138,8 @@ impl RawErrProps {
     pub fn to_fingerprinted(self, fingerprint: String) -> FingerprintedErrProps {
         FingerprintedErrProps {
             exception_list: self.exception_list,
-            fingerprint,
+            fingerprint: self.fingerprint.unwrap_or(fingerprint.clone()),
+            proposed_fingerprint: fingerprint,
             other: self.other,
         }
     }
@@ -127,11 +147,97 @@ impl RawErrProps {
 
 impl FingerprintedErrProps {
     pub fn to_output(self, issue_id: Uuid) -> OutputErrProps {
+        let frames = self
+            .exception_list
+            .iter()
+            .filter_map(|e| e.stack.as_ref())
+            .flat_map(Stacktrace::get_frames);
+
+        let sources = unique_by(frames.clone(), |f| f.source.clone());
+        let functions = unique_by(frames, |f| f.resolved_name.clone());
+
+        let types = unique_by(self.exception_list.iter(), |e| {
+            Some(e.exception_type.clone())
+        });
+        let values = unique_by(self.exception_list.iter(), |e| {
+            Some(e.exception_message.clone())
+        });
+
         OutputErrProps {
             exception_list: self.exception_list,
             fingerprint: self.fingerprint,
             issue_id,
+            proposed_fingerprint: self.proposed_fingerprint,
             other: self.other,
+
+            types,
+            values,
+            sources,
+            functions,
+        }
+    }
+}
+
+fn unique_by<T, I, F, K>(items: I, key_extractor: F) -> Vec<K>
+where
+    I: Iterator<Item = T>,
+    F: Fn(T) -> Option<K>,
+    K: Eq + Hash + Clone,
+{
+    items
+        .filter_map(key_extractor)
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+impl OutputErrProps {
+    pub fn add_error_message(&mut self, msg: impl ToString) {
+        let mut errors = match self.other.remove("$cymbal_errors") {
+            Some(serde_json::Value::Array(errors)) => errors,
+            _ => Vec::new(),
+        };
+
+        errors.push(serde_json::Value::String(msg.to_string()));
+
+        self.other.insert(
+            "$cymbal_errors".to_string(),
+            serde_json::Value::Array(errors),
+        );
+    }
+
+    pub fn strip_frame_junk(&mut self) {
+        self.exception_list.iter_mut().for_each(|exception| {
+            if let Some(Stacktrace::Resolved { frames }) = &mut exception.stack {
+                frames.iter_mut().for_each(|frame| frame.junk_drawer = None);
+            }
+        });
+    }
+}
+
+impl Stacktrace {
+    pub fn resolve(&self, lookup_table: &HashMap<String, Frame>) -> Option<Self> {
+        let Stacktrace::Raw { frames } = self else {
+            return Some(self.clone());
+        };
+
+        let mut resolved_frames = Vec::with_capacity(frames.len());
+        for frame in frames {
+            match lookup_table.get(&frame.frame_id()) {
+                Some(resolved_frame) => resolved_frames.push(resolved_frame.clone()),
+                None => return None,
+            }
+        }
+
+        Some(Stacktrace::Resolved {
+            frames: resolved_frames,
+        })
+    }
+
+    pub fn get_frames(&self) -> &[Frame] {
+        match self {
+            Stacktrace::Resolved { frames } => frames,
+            _ => &[],
         }
     }
 }
@@ -173,7 +279,9 @@ mod test {
             panic!("Expected a Raw stacktrace")
         };
         assert_eq!(frames.len(), 2);
-        let RawFrame::JavaScript(frame) = &frames[0];
+        let RawFrame::JavaScriptWeb(frame) = &frames[0] else {
+            panic!("Expected a JavaScript frame")
+        };
 
         assert_eq!(
             frame.source_url,
@@ -181,18 +289,20 @@ mod test {
         );
         assert_eq!(frame.fn_name, "?".to_string());
         assert!(frame.in_app);
-        assert_eq!(frame.line, 64);
-        assert_eq!(frame.column, 25112);
+        assert_eq!(frame.location.as_ref().unwrap().line, 64);
+        assert_eq!(frame.location.as_ref().unwrap().column, 25112);
 
-        let RawFrame::JavaScript(frame) = &frames[1];
+        let RawFrame::JavaScriptWeb(frame) = &frames[1] else {
+            panic!("Expected a JavaScript frame")
+        };
         assert_eq!(
             frame.source_url,
             Some("https://app-static.eu.posthog.com/static/chunk-PGUQKT6S.js".to_string())
         );
         assert_eq!(frame.fn_name, "n.loadForeignModule".to_string());
         assert!(frame.in_app);
-        assert_eq!(frame.line, 64);
-        assert_eq!(frame.column, 15003);
+        assert_eq!(frame.location.as_ref().unwrap().line, 64);
+        assert_eq!(frame.location.as_ref().unwrap().column, 15003);
     }
 
     #[test]

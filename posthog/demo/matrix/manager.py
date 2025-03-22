@@ -7,7 +7,7 @@ from django.conf import settings
 from django.core import exceptions
 from django.db import transaction, IntegrityError
 
-from posthog.client import query_with_columns, sync_execute
+from posthog.clickhouse.client import query_with_columns, sync_execute
 from posthog.demo.matrix.taxonomy_inference import infer_taxonomy_for_team
 from posthog.models import (
     Cohort,
@@ -95,10 +95,11 @@ class MatrixManager:
 
     def reset_master(self):
         if self.matrix.is_complete is None:
+            if self.print_steps:
+                print(f"Simulating data...")
             self.matrix.simulate()
         master_team = self._prepare_master_team(ensure_blank_slate=True)
         self._save_analytics_data(master_team)
-        self._sleep_until_person_data_in_clickhouse(self.MASTER_TEAM_ID)
 
     @staticmethod
     def create_team(organization: Organization, **kwargs) -> Team:
@@ -112,8 +113,6 @@ class MatrixManager:
         return team
 
     def run_on_team(self, team: Team, user: User):
-        if self.print_steps:
-            print(f"Saving simulated data...")
         does_clickhouse_data_need_saving = True
         if self.use_pre_save:
             does_clickhouse_data_need_saving = not self._is_demo_data_pre_saved()
@@ -122,6 +121,8 @@ class MatrixManager:
             source_team = team
         if does_clickhouse_data_need_saving:
             if self.matrix.is_complete is None:
+                if self.print_steps:
+                    print(f"Simulating data...")
                 self.matrix.simulate()
             self._save_analytics_data(source_team)
         if self.use_pre_save:
@@ -129,18 +130,21 @@ class MatrixManager:
         self._sync_postgres_with_clickhouse_data(source_team.pk, team.pk)
         self.matrix.set_project_up(team, user)
         if self.print_steps:
-            print(f"Inferring taxonomy for Data Management...")
+            print(f"Inferring taxonomy for data management...")
         event_definition_count, property_definition_count, event_properties_count = infer_taxonomy_for_team(team.pk)
         if self.print_steps:
             print(
                 f"Inferred {event_definition_count} event definitions, {property_definition_count} property definitions, and {event_properties_count} event-property pairs."
             )
-        for cohort in Cohort.objects.filter(team=team):
+        for cohort in Cohort.objects.filter(team__project_id=team.project_id):
             cohort.calculate_people_ch(pending_version=0)
         team.project.save()
         team.save()
+        print(f"Demo data ready for team ID {team.pk}.")
 
     def _save_analytics_data(self, data_team: Team):
+        if self.print_steps:
+            print(f"Saving simulated data...")
         sim_persons = self.matrix.people
         bulk_group_type_mappings = []
         if len(self.matrix.groups.keys()) + self.matrix.group_type_index_offset > 5:
@@ -174,6 +178,7 @@ class MatrixManager:
 
     @classmethod
     def _prepare_master_team(cls, *, ensure_blank_slate: bool = False) -> Team:
+        print("Preparing master team...")
         master_team = Team.objects.filter(id=cls.MASTER_TEAM_ID).first()
         if master_team is None:
             master_team = cls._create_master_team()
@@ -199,7 +204,7 @@ class MatrixManager:
         #         )
         #     ]
         # )
-        GroupTypeMapping.objects.filter(team_id=cls.MASTER_TEAM_ID).delete()
+        GroupTypeMapping.objects.filter(project_id=cls.MASTER_TEAM_ID).delete()
 
     def _copy_analytics_data_from_master_team(self, target_team: Team):
         from posthog.models.event.sql import COPY_EVENTS_BETWEEN_TEAMS
@@ -209,6 +214,9 @@ class MatrixManager:
             COPY_PERSONS_BETWEEN_TEAMS,
         )
 
+        if self.print_steps:
+            print(f"Copying simulated data from master team...")
+
         copy_params = {
             "source_team_id": self.MASTER_TEAM_ID,
             "target_team_id": target_team.pk,
@@ -217,11 +225,11 @@ class MatrixManager:
         sync_execute(COPY_PERSON_DISTINCT_ID2S_BETWEEN_TEAMS, copy_params)
         sync_execute(COPY_EVENTS_BETWEEN_TEAMS, copy_params)
         sync_execute(COPY_GROUPS_BETWEEN_TEAMS, copy_params)
-        GroupTypeMapping.objects.filter(team_id=target_team.pk).delete()
+        GroupTypeMapping.objects.filter(project_id=target_team.project_id).delete()
         GroupTypeMapping.objects.bulk_create(
             (
-                GroupTypeMapping(team=target_team, project_id=target_team.project_id, **record)
-                for record in GroupTypeMapping.objects.filter(team_id=self.MASTER_TEAM_ID).values(
+                GroupTypeMapping(team_id=target_team.id, project_id=target_team.project_id, **record)
+                for record in GroupTypeMapping.objects.filter(project_id=self.MASTER_TEAM_ID).values(
                     "group_type", "group_type_index", "name_singular", "name_plural"
                 )
             ),
@@ -365,12 +373,9 @@ class MatrixManager:
         raw_create_group_ch(team.pk, type_index, key, properties, timestamp)
 
     def _sleep_until_person_data_in_clickhouse(self, team_id: int):
-        from posthog.models.person.sql import (
-            GET_PERSON_COUNT_FOR_TEAM,
-            GET_PERSON_DISTINCT_ID2_COUNT_FOR_TEAM,
-        )
+        from posthog.models.person.sql import GET_PERSON_COUNT_FOR_TEAM, GET_PERSON_DISTINCT_ID2_COUNT_FOR_TEAM
 
-        while True:
+        for _ in range(120):
             person_count: int = sync_execute(GET_PERSON_COUNT_FOR_TEAM, {"team_id": team_id})[0][0]
             person_distinct_id_count: int = sync_execute(GET_PERSON_DISTINCT_ID2_COUNT_FOR_TEAM, {"team_id": team_id})[
                 0
@@ -393,6 +398,8 @@ class MatrixManager:
                     f"Persons: {persons_progress}. Person distinct IDs: {person_distinct_ids_progress}."
                 )
             sleep(0.5)
+        else:
+            raise TimeoutError("Person data did not land in ClickHouse in time.")
 
     @classmethod
     def _is_demo_data_pre_saved(cls) -> bool:

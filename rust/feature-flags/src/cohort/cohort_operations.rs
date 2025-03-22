@@ -9,53 +9,40 @@ use crate::{
 };
 
 impl Cohort {
-    /// Returns a cohort from postgres given a cohort_id and team_id
-    #[instrument(skip_all)]
-    pub async fn from_pg(
-        client: Arc<dyn DatabaseClient + Send + Sync>,
-        cohort_id: i32,
-        team_id: i32,
-    ) -> Result<Cohort, FlagError> {
-        let mut conn = client.get_connection().await.map_err(|e| {
-            tracing::error!("Failed to get database connection: {}", e);
-            // TODO should I model my errors more generally?  Like, yes, everything behind this API is technically a FlagError,
-            // but I'm not sure if accessing Cohort definitions should be a FlagError (vs idk, a CohortError?  A more general API error?)
-            FlagError::DatabaseUnavailable
-        })?;
-
-        let query = "SELECT id, name, description, team_id, deleted, filters, query, version, pending_version, count, is_calculating, is_static, errors_calculating, groups, created_by_id FROM posthog_cohort WHERE id = $1 AND team_id = $2";
-        let cohort = sqlx::query_as::<_, Cohort>(query)
-            .bind(cohort_id)
-            .bind(team_id)
-            .fetch_optional(&mut *conn)
-            .await
-            .map_err(|e| {
-                tracing::error!("Failed to fetch cohort from database: {}", e);
-                FlagError::Internal(format!("Database query error: {}", e))
-            })?;
-
-        cohort.ok_or_else(|| {
-            FlagError::CohortNotFound(format!(
-                "Cohort with id {} not found for team {}",
-                cohort_id, team_id
-            ))
-        })
-    }
-
     /// Returns all cohorts for a given team
     #[instrument(skip_all)]
     pub async fn list_from_pg(
         client: Arc<dyn DatabaseClient + Send + Sync>,
-        team_id: i32,
+        project_id: i64,
     ) -> Result<Vec<Cohort>, FlagError> {
         let mut conn = client.get_connection().await.map_err(|e| {
             tracing::error!("Failed to get database connection: {}", e);
             FlagError::DatabaseUnavailable
         })?;
 
-        let query = "SELECT id, name, description, team_id, deleted, filters, query, version, pending_version, count, is_calculating, is_static, errors_calculating, groups, created_by_id FROM posthog_cohort WHERE team_id = $1";
+        let query = r#"
+            SELECT c.id,
+                  c.name,
+                  c.description,
+                  c.team_id,
+                  c.deleted,
+                  c.filters,
+                  c.query,
+                  c.version,
+                  c.pending_version,
+                  c.count,
+                  c.is_calculating,
+                  c.is_static,
+                  c.errors_calculating,
+                  c.groups,
+                  c.created_by_id
+              FROM posthog_cohort AS c
+              JOIN posthog_team AS t ON (c.team_id = t.id)
+            WHERE t.project_id = $1
+            AND c.deleted = false
+        "#;
         let cohorts = sqlx::query_as::<_, Cohort>(query)
-            .bind(team_id)
+            .bind(project_id)
             .fetch_all(&mut *conn)
             .await
             .map_err(|e| {
@@ -71,23 +58,31 @@ impl Cohort {
     // https://github.com/PostHog/posthog/blob/feat/dynamic-cohorts-rust/posthog/models/cohort/cohort.py#L114-L169
     // I'll handle that in a separate PR.
     pub fn parse_filters(&self) -> Result<Vec<PropertyFilter>, FlagError> {
-        let cohort_property: CohortProperty = serde_json::from_value(self.filters.clone())
-            .map_err(|e| {
+        let filters = match &self.filters {
+            Some(filters) => filters,
+            None => return Ok(Vec::new()), // Return empty vec if no filters
+        };
+
+        let cohort_property: CohortProperty =
+            serde_json::from_value(filters.to_owned()).map_err(|e| {
                 tracing::error!("Failed to parse filters for cohort {}: {}", self.id, e);
                 FlagError::CohortFiltersParsingError
             })?;
-        Ok(cohort_property
-            .properties
-            .to_property_filters()
-            .into_iter()
-            .filter(|f| !(f.key == "id" && f.prop_type == "cohort"))
-            .collect())
+
+        let mut props = cohort_property.properties.to_inner();
+        props.retain(|f| !(f.key == "id" && f.prop_type == "cohort"));
+        Ok(props)
     }
 
     /// Extracts dependent CohortIds from the cohort's filters
     pub fn extract_dependencies(&self) -> Result<HashSet<CohortId>, FlagError> {
-        let cohort_property: CohortProperty = serde_json::from_value(self.filters.clone())
-            .map_err(|e| {
+        let filters = match &self.filters {
+            Some(filters) => filters,
+            None => return Ok(HashSet::new()), // Return empty set if no filters
+        };
+
+        let cohort_property: CohortProperty =
+            serde_json::from_value(filters.clone()).map_err(|e| {
                 tracing::error!("Failed to parse filters for cohort {}: {}", self.id, e);
                 FlagError::CohortFiltersParsingError
             })?;
@@ -175,11 +170,10 @@ impl InnerCohortProperty {
     ///   ]
     /// }
     /// ```
-    pub fn to_property_filters(&self) -> Vec<PropertyFilter> {
+    pub fn to_inner(self) -> Vec<PropertyFilter> {
         self.values
-            .iter()
-            .flat_map(|value| &value.values)
-            .cloned()
+            .into_iter()
+            .flat_map(|value| value.values)
             .collect()
     }
 }
@@ -197,45 +191,17 @@ mod tests {
     use serde_json::json;
 
     #[tokio::test]
-    async fn test_cohort_from_pg() {
-        let postgres_reader = setup_pg_reader_client(None).await;
-        let postgres_writer = setup_pg_writer_client(None).await;
-
-        let team = insert_new_team_in_pg(postgres_reader.clone(), None)
-            .await
-            .expect("Failed to insert team");
-
-        let cohort = insert_cohort_for_team_in_pg(
-            postgres_writer.clone(),
-            team.id,
-            None,
-            json!({"properties": {"type": "OR", "values": [{"type": "OR", "values": [{"key": "$initial_browser_version", "type": "person", "value": ["125"], "negation": false, "operator": "exact"}]}]}}),
-            false,
-        )
-        .await
-        .expect("Failed to insert cohort");
-
-        let fetched_cohort = Cohort::from_pg(postgres_reader, cohort.id, team.id)
-            .await
-            .expect("Failed to fetch cohort");
-
-        assert_eq!(fetched_cohort.id, cohort.id);
-        assert_eq!(fetched_cohort.name, "Test Cohort");
-        assert_eq!(fetched_cohort.team_id, team.id);
-    }
-
-    #[tokio::test]
     async fn test_list_from_pg() {
-        let postgres_reader = setup_pg_reader_client(None).await;
-        let postgres_writer = setup_pg_writer_client(None).await;
+        let reader = setup_pg_reader_client(None).await;
+        let writer = setup_pg_writer_client(None).await;
 
-        let team = insert_new_team_in_pg(postgres_reader.clone(), None)
+        let team = insert_new_team_in_pg(reader.clone(), None)
             .await
             .expect("Failed to insert team");
 
         // Insert multiple cohorts for the team
         insert_cohort_for_team_in_pg(
-            postgres_writer.clone(),
+            writer.clone(),
             team.id,
             Some("Cohort 1".to_string()),
             json!({"properties": {"type": "AND", "values": [{"type": "property", "values": [{"key": "age", "type": "person", "value": [30], "negation": false, "operator": "gt"}]}]}}),
@@ -245,7 +211,7 @@ mod tests {
         .expect("Failed to insert cohort1");
 
         insert_cohort_for_team_in_pg(
-            postgres_writer.clone(),
+            writer.clone(),
             team.id,
             Some("Cohort 2".to_string()),
             json!({"properties": {"type": "OR", "values": [{"type": "property", "values": [{"key": "country", "type": "person", "value": ["USA"], "negation": false, "operator": "exact"}]}]}}),
@@ -254,12 +220,12 @@ mod tests {
         .await
         .expect("Failed to insert cohort2");
 
-        let cohorts = Cohort::list_from_pg(postgres_reader, team.id)
+        let cohorts = Cohort::list_from_pg(reader, team.project_id)
             .await
             .expect("Failed to list cohorts");
 
         assert_eq!(cohorts.len(), 2);
-        let names: HashSet<String> = cohorts.into_iter().map(|c| c.name).collect();
+        let names: HashSet<String> = cohorts.into_iter().filter_map(|c| c.name).collect();
         assert!(names.contains("Cohort 1"));
         assert!(names.contains("Cohort 2"));
     }
@@ -268,11 +234,13 @@ mod tests {
     fn test_cohort_parse_filters() {
         let cohort = Cohort {
             id: 1,
-            name: "Test Cohort".to_string(),
+            name: Some("Test Cohort".to_string()),
             description: None,
             team_id: 1,
             deleted: false,
-            filters: json!({"properties": {"type": "OR", "values": [{"type": "OR", "values": [{"key": "$initial_browser_version", "type": "person", "value": ["125"], "negation": false, "operator": "exact"}]}]}}),
+            filters: Some(
+                json!({"properties": {"type": "OR", "values": [{"type": "OR", "values": [{"key": "$initial_browser_version", "type": "person", "value": ["125"], "negation": false, "operator": "exact"}]}]}}),
+            ),
             query: None,
             version: None,
             pending_version: None,
@@ -292,7 +260,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cohort_property_to_property_filters() {
+    fn test_cohort_property_to_inner() {
         let cohort_property = InnerCohortProperty {
             prop_type: CohortPropertyType::AND,
             values: vec![CohortValues {
@@ -318,7 +286,7 @@ mod tests {
             }],
         };
 
-        let result = cohort_property.to_property_filters();
+        let result = cohort_property.to_inner();
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].key, "email");
         assert_eq!(result[0].value, json!("test@example.com"));
@@ -328,16 +296,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_extract_dependencies() {
-        let postgres_reader = setup_pg_reader_client(None).await;
-        let postgres_writer = setup_pg_writer_client(None).await;
+        let reader = setup_pg_reader_client(None).await;
+        let writer = setup_pg_writer_client(None).await;
 
-        let team = insert_new_team_in_pg(postgres_reader.clone(), None)
+        let team = insert_new_team_in_pg(reader.clone(), None)
             .await
             .expect("Failed to insert team");
 
         // Insert a single cohort that is dependent on another cohort
         let dependent_cohort = insert_cohort_for_team_in_pg(
-            postgres_writer.clone(),
+            writer.clone(),
             team.id,
             Some("Dependent Cohort".to_string()),
             json!({"properties": {"type": "OR", "values": [{"type": "OR", "values": [{"key": "$browser", "type": "person", "value": ["Safari"], "negation": false, "operator": "exact"}]}]}}),
@@ -348,7 +316,7 @@ mod tests {
 
         // Insert main cohort with a single dependency
         let main_cohort = insert_cohort_for_team_in_pg(
-                postgres_writer.clone(),
+                writer.clone(),
                 team.id,
                 Some("Main Cohort".to_string()),
                 json!({"properties": {"type": "OR", "values": [{"type": "OR", "values": [{"key": "id", "type": "cohort", "value": dependent_cohort.id, "negation": false}]}]}}),
@@ -357,11 +325,14 @@ mod tests {
             .await
             .expect("Failed to insert main_cohort");
 
-        let fetched_main_cohort = Cohort::from_pg(postgres_reader.clone(), main_cohort.id, team.id)
+        let cohorts = Cohort::list_from_pg(reader.clone(), team.project_id)
             .await
-            .expect("Failed to fetch main cohort");
+            .expect("Failed to fetch cohorts");
 
-        println!("fetched_main_cohort: {:?}", fetched_main_cohort);
+        let fetched_main_cohort = cohorts
+            .into_iter()
+            .find(|c| c.id == main_cohort.id)
+            .expect("Failed to find main cohort");
 
         let dependencies = fetched_main_cohort.extract_dependencies().unwrap();
         let expected_dependencies: HashSet<CohortId> =
